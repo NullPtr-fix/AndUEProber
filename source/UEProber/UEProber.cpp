@@ -1,7 +1,7 @@
 #include "UEProber.h"
 
 #include "Core/ElfScannerManager.h"
-#include "UECore/CoreUObject_classes.h"
+#include "UECore/CoreUObject_classes.hpp"
 #include "Utils/FileLogger.h"
 #include "Utils/Logger.h"
 

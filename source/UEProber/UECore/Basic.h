@@ -1,3 +1,4 @@
+
 #pragma once
 
 #include <cstdint>
@@ -12,16 +13,14 @@ namespace SDK {
 
 using namespace UC;
 
-namespace Offsets
-{
-	constexpr int32 ProcessEventIdx = 0x00000045;
-}
-
 namespace InSDKUtils
 {
 	inline uintptr_t s_ImageBase = 0;
 
-	uintptr_t GetImageBase();
+	inline uintptr_t GetImageBase()
+	{
+		return s_ImageBase;
+	}
 
 	template<typename FuncType>
 	inline FuncType GetVirtualFunction(const void* ObjectInstance, int32 Index)
@@ -180,7 +179,7 @@ public:
 		return reinterpret_cast<uint8*>(ObjPtr);
 	};
 
-	int32                                         NumElementsPerChunk = 0x10000;
+	static inline int32                           NumElementsPerChunk = 0x10000;
 
 	struct FUObjectItem**                         Objects;                                           // 0x0000(0x0008)(NOT AUTO-GENERATED PROPERTY)
 	uint8                                         Pad_8[0x8];                                        // 0x0008(0x0008)(Fixing Size After Last Property [ Dumper-7 ])
@@ -282,8 +281,6 @@ public:
 class FName final
 {
 public:
-	static inline void*                           AppendString = nullptr;                            // 0x0000(0x0004)(NOT AUTO-GENERATED PROPERTY)
-
 	static inline std::function<std::string(int32_t)> s_NameResolver;
 
 #define bWITH_CASE_PRESERVING_NAME false
@@ -709,6 +706,22 @@ static_assert(alignof(FScriptDelegate) == 0x000004, "Wrong alignment on FScriptD
 static_assert(sizeof(FScriptDelegate) == 0x000010, "Wrong size on FScriptDelegate");
 static_assert(offsetof(FScriptDelegate, Object) == 0x000000, "Member 'FScriptDelegate::Object' has a wrong offset!");
 static_assert(offsetof(FScriptDelegate, FunctionName) == 0x000008, "Member 'FScriptDelegate::FunctionName' has a wrong offset!");
+
+// Predefined delegate placeholder structs. The dumper synthesizes these
+// names from FProperty kinds in per-package SDK output (e.g. dumped fields
+// like `struct FMulticastInlineDelegate OnFoo;`); UE itself does not expose
+// them as publicly-named types. Sizes mirror the FProperty ElementSize the
+// dumper emits for each kind so the surrounding struct layout stays
+// byte-correct. Listed in kBuiltinIdents in UPackageGenerator.cpp so they
+// don't appear in dep tracking.
+struct FDelegate                 { uint8 _opaque[0x10]; };
+struct FMulticastDelegate        { uint8 _opaque[0x10]; };
+struct FMulticastInlineDelegate  { uint8 _opaque[0x10]; };
+struct FMulticastSparseDelegate  { uint8 _opaque[0x01]; };
+static_assert(sizeof(FDelegate)                 == 0x10, "Wrong size on FDelegate");
+static_assert(sizeof(FMulticastDelegate)        == 0x10, "Wrong size on FMulticastDelegate");
+static_assert(sizeof(FMulticastInlineDelegate)  == 0x10, "Wrong size on FMulticastInlineDelegate");
+static_assert(sizeof(FMulticastSparseDelegate)  == 0x01, "Wrong size on FMulticastSparseDelegate");
 
 // Predefined struct TDelegate
 // 0x0028 (0x0028 - 0x0000)

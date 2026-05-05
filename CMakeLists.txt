@@ -162,6 +162,7 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 target_compile_definitions(${PROJECT_NAME} PRIVATE
     kBUILD_LIBRARY
     kNO_KEYSTONE # KittyMemory
+    kUSE_KITTYMEMORYEX
     kENABLE_FORMAT_LOG
     kANDROID_LOG
     kANDROID_LOG_TAG="INJECT"

@@ -370,6 +370,16 @@ void StartDumpWithProbedOffsets(
         for (const auto& it : dumpbuffersMap) {
             if (!it.first.empty()) {
                 std::string path = KittyUtils::String::fmt("%s/%s", sDumpGameDir.c_str(), it.first.c_str());
+                // Buffer keys may carry subdirectories (e.g. "SDK_A/Basic.hpp",
+                // "SDK_B/Engine_classes.hpp"). writeBufferToFile won't create
+                // missing parent dirs, so do it here.
+                size_t lastSlash = path.find_last_of('/');
+                if (lastSlash != std::string::npos) {
+                    std::string parent = path.substr(0, lastSlash);
+                    if (parent != sDumpGameDir) {
+                        IOUtils::mkdir_recursive(parent, 0777);
+                    }
+                }
                 it.second.writeBufferToFile(path);
             }
         }

@@ -16,7 +16,6 @@
 #include "GameProfiles/IGameProfileEx.hpp"
 
 // All game profiles from AndUEDumper
-#include "UE/UEGameProfiles/ArenaBreakout.hpp"
 #include "UE/UEGameProfiles/BlackClover.hpp"
 #include "UE/UEGameProfiles/Dislyte.hpp"
 #include "UE/UEGameProfiles/Farlight.hpp"
@@ -47,6 +46,7 @@
 #include "GameProfiles/DeltaForce.hpp"
 #include "GameProfiles/NiZhan.hpp"
 #include "GameProfiles/RocoKingdom.hpp"
+#include "GameProfiles/ArenaBreakout.hpp"
 
 #include "Utils/Logger.hpp"
 

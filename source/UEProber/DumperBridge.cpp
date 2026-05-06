@@ -284,6 +284,9 @@ void StartDumpWithProbedOffsets(
     if (offsets.structChildProps) probedUEOffsets.UStruct.ChildProperties = offsets.structChildProps;
     if (offsets.structSize)      probedUEOffsets.UStruct.PropertiesSize = offsets.structSize;
 
+    if (offsets.uclassCastFlags)     probedUEOffsets.UClass.CastFlags     = offsets.uclassCastFlags;
+    if (offsets.uclassDefaultObject) probedUEOffsets.UClass.DefaultObject = offsets.uclassDefaultObject;
+
     if (offsets.funcFlags)     probedUEOffsets.UFunction.EFunctionFlags = offsets.funcFlags;
     if (offsets.funcNumParams) probedUEOffsets.UFunction.NumParams = offsets.funcNumParams;
     if (offsets.funcParamSize) probedUEOffsets.UFunction.ParamSize = offsets.funcParamSize;

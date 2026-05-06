@@ -4463,6 +4463,10 @@ void UEProber::StartDump() {
     if (HasConfirmed("UStruct::ChildProperties")) offsets.structChildProps = GetConfirmedOffset("UStruct::ChildProperties");
     if (HasConfirmed("UStruct::PropertiesSize")) offsets.structSize      = GetConfirmedOffset("UStruct::PropertiesSize");
 
+    // UClass
+    if (HasConfirmed("UClass::CastFlags"))           offsets.uclassCastFlags     = GetConfirmedOffset("UClass::CastFlags");
+    if (HasConfirmed("UClass::ClassDefaultObject"))  offsets.uclassDefaultObject = GetConfirmedOffset("UClass::ClassDefaultObject");
+
     // UFunction
     if (HasConfirmed("UFunction::FunctionFlags")) offsets.funcFlags    = GetConfirmedOffset("UFunction::FunctionFlags");
     if (HasConfirmed("UFunction::NumParms"))       offsets.funcNumParams = GetConfirmedOffset("UFunction::NumParms");

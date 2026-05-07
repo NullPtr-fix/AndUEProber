@@ -9,7 +9,7 @@
 | com.tencent.tmgp.dfm | ✅ | ✅ | ✅ | ✅ |
 | com.tencent.tmgp.nz | ✅ | ✅ | ✅ | ✅ |
 | com.tencent.nrc | ✅ | ✅ | ✅ | ✅ |
-| com.tencent.mf.uam | ✅ | ✅ | Hardcode | ✅ |
+| com.tencent.mf.uam | ✅ | ✅ | ✅ | ✅ |
 
 ### Screenshots
 

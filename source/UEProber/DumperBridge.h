@@ -52,6 +52,8 @@ struct ProbedOffsets {
     uintptr_t fieldNext = 0;
     // UStruct
     uintptr_t structSuper = 0, structChildren = 0, structChildProps = 0, structSize = 0;
+    // UClass
+    uintptr_t uclassCastFlags = 0, uclassDefaultObject = 0;
     // UFunction
     uintptr_t funcFlags = 0, funcNumParams = 0, funcParamSize = 0, funcFunc = 0;
     // FField

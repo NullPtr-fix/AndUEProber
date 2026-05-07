@@ -7,8 +7,3 @@ cmake-build-debug-system/
 cmake-build-release-system/
 
 .claude/
-
-misc/com.tencent.tmgp.dfm
-misc/DFM_SDK_1.201.3711274
-
-test/

@@ -9,15 +9,13 @@
 | com.tencent.tmgp.dfm | ✅ | ✅ | ✅ | ✅ |
 | com.tencent.tmgp.nz | ✅ | ✅ | ✅ | ✅ |
 | com.tencent.nrc | ✅ | ✅ | ✅ | ✅ |
-| com.tencent.mf.uam | ✅ | ✅ | Hardcode | ✅ |
+| com.tencent.mf.uam | ✅ | ✅ | ✅ | ✅ |
 
-### Screenshots
+## Screenshots
 
-| 探测结果总览 / Detection Results | 导出结构体 / Exported Structs | Dump 结果 / Dump Result |
-|:---:|:---:|:---:|
-| ![results](misc/p2.jpg) | ![export](misc/p1.jpg) | ![dump](misc/p3.jpg) |
-
-导出结构体示例 / Exported structs example: [ReverseProber_04-06_01-26-58.log](misc/ReverseProber_04-06_01-26-58.log)
+| 探测结果总览 / Detection Results | Dump 结果 / Dump Result |
+|:---:|:---:|
+| ![results](misc/p2.jpg) | ![dump](misc/p3.jpg) |
 
 探测原理 / How it works: [ReverseUE.md](source/UEProber/UECore/ReverseUE.md)（文档部分内容可能未及时更新 / Some parts may be outdated）
 
@@ -25,11 +23,15 @@
 
 <a id="中文"></a>
 
-### 重大更新
+## 概述
 
-集成了 [AndUEDumper](https://github.com/MJx0/AndUEDumper)，UEProber 可与 AndUEDumper 无缝衔接——探测完成后可直接触发 Dump，无需手动配置偏移。
+集成了 [AndUEDumper](https://github.com/MJx0/AndUEDumper)，
+UEProber 可与 AndUEDumper 无缝衔接 —— 探测完成后可直接触发 Dump，无需手动配置偏移，
+生成的 SDK 可直接通过 `#include "SDK_A/SDK.hpp"` 引入编译使用。
 
-### 构建
+> 已在 [AndUEChams](https://github.com/DumpA1n/AndUEChams) 中投入使用
+
+## 构建
 
 **环境要求：**
 - CMake 3.22.1+
@@ -47,23 +49,25 @@ cmake --build build
 
 输出：`libAndUEProber.so`
 
-### 使用方法
+## 使用方法
 
 使用 [AndKittyInjector v5.1.0](https://github.com/MJx0/AndKittyInjector) 注入到目标应用：
 
 ```bash
-./AndKittyInjector --package <包名> -lib libAndUEProber.so --memfd --hide --watch --delay 50
+./AndKittyInjector --package <包名> --libs libAndUEProber.so --memfd --hide --watch
 ```
 
 ---
 
 <a id="english"></a>
 
-### Major Update
+## Overview
 
-Integrated [AndUEDumper](https://github.com/MJx0/AndUEDumper) — UEProber now works seamlessly with AndUEDumper. After probing completes, you can trigger a Dump directly without manual offset configuration.
+Integrated [AndUEDumper](https://github.com/MJx0/AndUEDumper) — UEProber now works seamlessly with AndUEDumper. After probing completes, you can trigger a Dump directly without manual offset configuration. The generated SDK can be included via `#include "SDK_A/SDK.hpp"`.
 
-### Build
+> Already used in [AndUEChams](https://github.com/DumpA1n/AndUEChams)
+
+## Build
 
 **Requirements:**
 - CMake 3.22.1+
@@ -81,17 +85,17 @@ cmake --build build
 
 Output: `libAndUEProber.so`
 
-### Usage
+## Usage
 
 Inject into a target app using [AndKittyInjector v5.1.0](https://github.com/MJx0/AndKittyInjector):
 
 ```bash
-./AndKittyInjector --package <package_name> -lib libAndUEProber.so --memfd --hide --watch --delay 50
+./AndKittyInjector --package <package_name> --libs libAndUEProber.so --memfd --hide --watch
 ```
 
 ---
 
-### Todo
+## Todo
 
 - [x] Auto-detect GUObjectArray / GetPlainANSIString / ProcessEventIdx
 

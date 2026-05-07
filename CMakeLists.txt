@@ -13,26 +13,45 @@ project(AndUEProber C CXX ASM)
 
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
 
-# Optimization flags for smaller binary size
 if(CMAKE_BUILD_TYPE STREQUAL "Release")
     add_compile_options(-fvisibility=hidden -ffunction-sections -fdata-sections)
     add_link_options(-Wl,--gc-sections -Wl,--strip-all -Wl,--exclude-libs,ALL)
 endif()
 
-# ============================================================
-#  AndSwapChainHook — compile as a static library
-# ============================================================
 set(ANDSWAPCHAIN_DIR ${CMAKE_CURRENT_SOURCE_DIR}/external/AndSwapChainHook)
+set(ANDUEDUMPER_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/external/AndUEDumper)
 
-file(GLOB_RECURSE ANDSWAPCHAIN_SOURCES
+# KittyMemoryEx — single source of truth
+set(KITTY_ROOT  ${ANDSWAPCHAIN_DIR}/external/KittyMemoryEx)
+set(KITTY_INNER ${KITTY_ROOT}/KittyMemoryEx)
+
+file(GLOB KITTY_SOURCES CONFIGURE_DEPENDS ${KITTY_INNER}/*.cpp)
+list(FILTER KITTY_SOURCES EXCLUDE REGEX "MemoryPatch\\.cpp$")
+list(FILTER KITTY_SOURCES EXCLUDE REGEX "MemoryBackup\\.cpp$")
+
+add_library(KittyMemoryExLib STATIC ${KITTY_SOURCES})
+target_include_directories(KittyMemoryExLib PUBLIC
+    ${KITTY_ROOT}                # for "KittyMemoryEx/KittyMemoryEx.hpp"
+    ${KITTY_INNER}               # for unprefixed <KittyMemoryMgr.hpp> etc.
+    ${KITTY_INNER}/Deps
+)
+target_compile_definitions(KittyMemoryExLib PUBLIC
+    kUSE_KITTYMEMORYEX
+    kNO_KEYSTONE
+)
+target_link_libraries(KittyMemoryExLib PRIVATE log)
+
+# AndSwapChainHook — static library
+file(GLOB_RECURSE ANDSWAPCHAIN_SOURCES CONFIGURE_DEPENDS
     ${ANDSWAPCHAIN_DIR}/source/*.cpp
     ${ANDSWAPCHAIN_DIR}/source/*.c
+    ${ANDSWAPCHAIN_DIR}/source/*.s
 )
-list(FILTER ANDSWAPCHAIN_SOURCES EXCLUDE REGEX "android_native_app_glue\\.c$")
 list(FILTER ANDSWAPCHAIN_SOURCES EXCLUDE REGEX "Library\\.cpp$")
 
-file(GLOB IMGUI_SOURCES
+file(GLOB IMGUI_SOURCES CONFIGURE_DEPENDS
     ${ANDSWAPCHAIN_DIR}/external/imgui/imgui.cpp
     ${ANDSWAPCHAIN_DIR}/external/imgui/imgui_demo.cpp
     ${ANDSWAPCHAIN_DIR}/external/imgui/imgui_draw.cpp
@@ -43,18 +62,9 @@ file(GLOB IMGUI_SOURCES
     ${ANDSWAPCHAIN_DIR}/external/imgui/backends/imgui_impl_opengl3.cpp
 )
 
-file(GLOB KITTYMEMORY_SOURCES
-    ${ANDSWAPCHAIN_DIR}/external/KittyMemory/*.cpp
-    ${ANDSWAPCHAIN_DIR}/external/KittyMemory/*.c
-)
-list(FILTER KITTYMEMORY_SOURCES EXCLUDE REGEX "MemoryPatch\\.cpp$")
-list(FILTER KITTYMEMORY_SOURCES EXCLUDE REGEX "MemoryBackup\\.cpp$")
-
 add_library(AndSwapChainHookLib STATIC
     ${ANDSWAPCHAIN_SOURCES}
     ${IMGUI_SOURCES}
-    ${KITTYMEMORY_SOURCES}
-    ${ANDSWAPCHAIN_DIR}/source/PointerHook/trampoline.s
 )
 
 target_include_directories(AndSwapChainHookLib PUBLIC
@@ -65,113 +75,62 @@ target_include_directories(AndSwapChainHookLib PUBLIC
 )
 
 target_compile_definitions(AndSwapChainHookLib PRIVATE
-    kBUILD_LIBRARY
-    kNO_KEYSTONE
     kANDROID_LOG
     kANDROID_LOG_TAG="INJECT"
     kPROJECT_NAME="${PROJECT_NAME}"
 )
 
-target_compile_options(AndSwapChainHookLib PRIVATE -std=c++20 -fexceptions)
-target_link_libraries(AndSwapChainHookLib android log vulkan GLESv3 EGL)
-# ============================================================
+target_link_libraries(AndSwapChainHookLib
+    PUBLIC  KittyMemoryExLib
+    PRIVATE android log vulkan GLESv3 EGL
+)
 
-# ============================================================
-#  Apply patches to AndUEDumper before compiling
-# ============================================================
-set(ANDUEDUMPER_ROOT ${CMAKE_CURRENT_SOURCE_DIR}/external/AndUEDumper)
-
-function(apply_anduedumper_patch patch_name)
-    execute_process(
-        COMMAND git apply --check ${CMAKE_CURRENT_SOURCE_DIR}/misc/${patch_name}
-        WORKING_DIRECTORY ${ANDUEDUMPER_ROOT}
-        RESULT_VARIABLE PATCH_RESULT
-        ERROR_QUIET
-    )
-    if(PATCH_RESULT EQUAL 0)
-        execute_process(
-            COMMAND git apply ${CMAKE_CURRENT_SOURCE_DIR}/misc/${patch_name}
-            WORKING_DIRECTORY ${ANDUEDUMPER_ROOT}
-        )
-        message(STATUS "Applied ${patch_name}")
-    else()
-        message(STATUS "${patch_name} already applied or not applicable")
-    endif()
-endfunction()
-
-apply_anduedumper_patch(UEWrappers_case_insensitive.patch)
-apply_anduedumper_patch(AIOHeader_sort_packages.patch)
-
-# ============================================================
-#  AndUEDumper — compile core dumper as a static library
-# ============================================================
+# AndUEDumper — core dumper static library
 set(ANDUEDUMPER_DIR  ${ANDUEDUMPER_ROOT}/AndUEDumper)
 set(ANDUEDUMPER_SRC  ${ANDUEDUMPER_DIR}/src)
 set(ANDUEDUMPER_DEPS ${ANDUEDUMPER_ROOT}/deps)
-set(KITTYMEMORYEX_DIR ${ANDUEDUMPER_DEPS}/KittyMemoryEx/KittyMemoryEx)
-file(GLOB ANDUEDUMPER_UE_SRC ${ANDUEDUMPER_SRC}/UE/*.cpp)
-file(GLOB ANDUEDUMPER_UTILS_SRC ${ANDUEDUMPER_SRC}/Utils/*.cpp)
-file(GLOB KITTYMEMORYEX_SRC ${KITTYMEMORYEX_DIR}/*.cpp)
+
+file(GLOB ANDUEDUMPER_UE_SRC    CONFIGURE_DEPENDS ${ANDUEDUMPER_SRC}/UE/*.cpp)
+file(GLOB ANDUEDUMPER_UTILS_SRC CONFIGURE_DEPENDS ${ANDUEDUMPER_SRC}/Utils/*.cpp)
 
 add_library(AndUEDumperLib STATIC
     ${ANDUEDUMPER_UE_SRC}
     ${ANDUEDUMPER_UTILS_SRC}
     ${ANDUEDUMPER_SRC}/Dumper.cpp
     ${ANDUEDUMPER_SRC}/UPackageGenerator.cpp
-    ${KITTYMEMORYEX_SRC}
     ${ANDUEDUMPER_DEPS}/fmt/format.cc
 )
 
-target_include_directories(AndUEDumperLib PRIVATE
-    ${KITTYMEMORYEX_DIR}
-    ${KITTYMEMORYEX_DIR}/Deps
-    ${ANDUEDUMPER_DEPS}
-    ${ANDUEDUMPER_SRC}
+target_include_directories(AndUEDumperLib PUBLIC
+    ${ANDUEDUMPER_SRC}        # exposed UE/* and Utils/BufferFmt.hpp consumed by UEProber
+    ${ANDUEDUMPER_DEPS}       # BufferFmt.hpp transitively needs fmt/; UEProber uses utfcpp/
 )
 
-target_compile_definitions(AndUEDumperLib PRIVATE
-    kNO_KEYSTONE
-)
+target_link_libraries(AndUEDumperLib PUBLIC KittyMemoryExLib)
 
-target_compile_options(AndUEDumperLib PRIVATE -std=c++20 -fexceptions)
-target_link_libraries(AndUEDumperLib log)
-# ============================================================
-
-set(LIBS
-    ${ANDSWAPCHAIN_DIR}/external/Dobby/arm64-v8a/libdobby.a
-)
-
-# UEProber-specific sources
-file(GLOB_RECURSE UEPROBER_SOURCES
+# AndUEProber — final shared library
+file(GLOB_RECURSE UEPROBER_SOURCES CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/source/UEProber/*.cpp
     ${CMAKE_CURRENT_SOURCE_DIR}/source/UEProber/*.c
 )
-add_library(${PROJECT_NAME} SHARED 
+
+add_library(AndUEProber SHARED
     ${CMAKE_CURRENT_SOURCE_DIR}/source/Library.cpp
     ${UEPROBER_SOURCES}
 )
 
-target_include_directories(${PROJECT_NAME} PRIVATE
+target_include_directories(AndUEProber PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/source
-    ${KITTYMEMORYEX_DIR}
-    ${KITTYMEMORYEX_DIR}/Deps
-    ${ANDUEDUMPER_DEPS}
-    ${ANDUEDUMPER_SRC}
 )
 
-target_compile_definitions(${PROJECT_NAME} PRIVATE
-    kBUILD_LIBRARY
-    kNO_KEYSTONE # KittyMemory
-    kUSE_KITTYMEMORYEX
-    kENABLE_FORMAT_LOG
+target_compile_definitions(AndUEProber PRIVATE
     kANDROID_LOG
     kANDROID_LOG_TAG="INJECT"
     kPROJECT_NAME="${PROJECT_NAME}"
 )
 
-# Allow multiple definitions: KittyMemory (in-process) and KittyMemoryEx (cross-process)
-# share some identical function implementations in KittyUtils namespace.
-# The linker picks the first definition found; all duplicates have identical implementations.
-target_link_options(${PROJECT_NAME} PRIVATE -Wl,--allow-multiple-definition)
-
-target_link_libraries(${PROJECT_NAME} ${LIBS} AndSwapChainHookLib AndUEDumperLib)
+target_link_libraries(AndUEProber PRIVATE
+    AndSwapChainHookLib
+    AndUEDumperLib
+    ${ANDSWAPCHAIN_DIR}/external/Dobby/arm64-v8a/libdobby.a
+)

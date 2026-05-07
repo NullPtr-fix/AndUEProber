@@ -90,17 +90,6 @@ public:
 
     uintptr_t FindGetPlainANSIString() const
     {
-        return GetUnrealELF().base() + 0x8E2C8EC;
-    
-        // Locate the BL to GetPlainANSIString in a JNI bridge that converts FName→Java String via "<init>".
-        // Register allocation (X19/X20) varies across builds, so anchors use wildcards:
-        //   STR X0,[Xn,#8]  → ? 06 00 F9    (Xn = X19 or X20)
-        //   LDR X8,[Xm]     → ? 02 40 F9    (Xm = X19 or X20)
-        //   MOV X0,Xn       → E0 03 ? AA    (Xn = X19 or X20)
-        //   MOV X1,X0       → E1 03 00 AA   (fixed)
-        //   LDR X8,[X8,#0x108] → 08 85 40 F9 (fixed)
-        //   MOV X3,X21      → E3 03 15 AA   (fixed)
-        //   BLR X8          → 00 01 3F D6   (fixed)
         std::vector<std::pair<std::string, int>> idaPatterns = {
             // P1: BL target → ADD → BL → STR [Xn,#8] → LDR [Xm] → ADRP → MOV X1,X0 → ADD → LDR [X8,#0x108]
             {"? ? ? 94 ? ? ? 91 ? ? ? 94 ? 06 00 F9 ? 02 40 F9 ? ? ? ? E1 03 00 AA ? ? ? 91 08 85 40 F9", 0},
@@ -110,6 +99,8 @@ public:
             {"? 06 00 F9 ? 02 40 F9 ? ? ? ? E1 03 00 AA ? ? ? 91 08 85 40 F9 E0 03 ? AA", -0xC},
             // P4: MOV X1,X0 → ADD → LDR [X8,#0x108] → MOV X0,Xn → MOV X3,X21 → BLR X8
             {"E1 03 00 AA ? ? ? 91 08 85 40 F9 E0 03 ? AA E3 03 15 AA 00 01 3F D6", -0x18},
+            // P5: 此 build 的指令调度——LDR X8,[X8,#vtbl_off] 被挪到 MOV X0/X3 之后、紧贴 BLR。
+            {"E1 03 00 AA ? ? ? 91 E0 03 ? AA E3 03 15 AA ? ? ? ? 00 01 3F D6", -0x18},
         };
 
         PATTERN_MAP_TYPE map_type = isEmulator() ? PATTERN_MAP_TYPE::ANY_R : PATTERN_MAP_TYPE::ANY_X;

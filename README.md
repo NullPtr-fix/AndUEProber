@@ -10,6 +10,7 @@
 | com.tencent.tmgp.nz | ✅ | ✅ | ✅ | ✅ |
 | com.tencent.nrc | ✅ | ✅ | ✅ | ✅ |
 | com.tencent.mf.uam | ✅ | ✅ | ✅ | ✅ |
+| com.tencent.tmgp.codev | ✅ | ✅ | ✅ | ✅ |
 
 ## Screenshots
 

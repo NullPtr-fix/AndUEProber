@@ -47,6 +47,7 @@
 #include "GameProfiles/NiZhan.hpp"
 #include "GameProfiles/RocoKingdom.hpp"
 #include "GameProfiles/ArenaBreakout.hpp"
+#include "GameProfiles/Valorant.hpp"
 
 #include "Utils/Logger.hpp"
 
@@ -121,6 +122,7 @@ static std::vector<IGameProfileEx*>& GetExProfiles()
         new GameProfileEx<DeltaForceProfile>(),
         new GameProfileEx<NiZhanProfile>(),
         new GameProfileEx<RocoKingdomProfile>(),
+        new GameProfileEx<ValorantProfile>(),
     };
     return profiles;
 }

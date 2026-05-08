@@ -1,10 +1,5 @@
 #include "UEProber.h"
 
-#include "Core/ElfScannerManager.h"
-#include "UECore/CoreUObject_classes.hpp"
-#include "Utils/FileLogger.h"
-#include "Utils/Logger.h"
-
 #include <algorithm>
 #include <chrono>
 #include <cstdint>
@@ -17,6 +12,10 @@
 #include <signal.h>
 #include <thread>
 #include <unistd.h>
+
+#include "UECore/CoreUObject_classes.hpp"
+#include "Utils/ElfScanner/ElfScannerManager.h"
+#include "Utils/Logger.h"
 
 // 探测器调试日志开关
 #define PROBER_DEBUG 1

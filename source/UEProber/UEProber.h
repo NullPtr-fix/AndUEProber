@@ -137,6 +137,12 @@ private:
     // standard UE layouts, and differ by the leading-metadata pad on games like
     // DeltaForce. Both results are written into the result map in one pass.
     void Phase5_ProbeFPropertySize();
+    // FEnumProperty.UnderlyingType / .Enum positions inside the subclass tail.
+    // Walks GObjects for any FEnumProperty instance, then probes both possible
+    // orderings (UnderlyingType-first standard vs Enum-first variant) by reading
+    // each candidate slot's FField::ClassPrivate name. Writes both result keys
+    // when one ordering uniquely matches.
+    void Phase5_ProbeFEnumPropertyLayout();
 
     // ======================== 阶段 6: ProcessEvent VTable ========================
 
@@ -255,6 +261,7 @@ private:
     uintptr_t m_FFIsValidParam0 = 0;   // IsValid->ChildProperties 首参 (ObjectProperty)
     uintptr_t m_FFIsValidReturn = 0;   // IsValid->ChildProperties Next链 (BoolProperty)
     uintptr_t m_FFK2LocReturn = 0;     // K2_GetActorLocation->ChildProperties (StructProperty)
+    uintptr_t m_FFEnumProp = 0;        // 任一 FEnumProperty 实例 (GObjects 扫描找)
 
     // 日志
     struct LogEntry {

@@ -3017,6 +3017,7 @@ void UEProber::Phase5_ProbeFPropertySize() {
         [](const auto& a, const auto& b) { return a.confidence > b.confidence; });
 
     PDBG("ProbePropSize: 候选数={}", m_Phase5FPropSizeCandidates.size());
+    // (FEnumProperty layout probe inserted after this block — see Phase5_ProbeFEnumPropertyLayout below)
     if (!m_Phase5FPropSizeCandidates.empty() && m_Phase5FPropSizeCandidates[0].confidence >= 0.7f) {
         auto& best = m_Phase5FPropSizeCandidates[0];
         // SubPropertyBase = first-known-pointer offset captured BEFORE any leading-metadata
@@ -3114,6 +3115,139 @@ void UEProber::Phase5_ProbeFPropertySize() {
     PDBG("<<<<<<<<<< [ProbeFPropertySize] END <<<<<<<<<<");
 }
 
+void UEProber::Phase5_ProbeFEnumPropertyLayout() {
+    PDBG(">>>>>>>>>> [ProbeFEnumPropertyLayout] BEGIN >>>>>>>>>>");
+
+    int32_t fpropSize    = GetConfirmedOffset("sizeof(FProperty)");
+    int32_t subBaseOff   = GetConfirmedOffset("FProperty::SubPropertyBase");
+    int32_t classOff     = GetConfirmedOffset("UObject::ClassPrivate");
+    int32_t namePrivOff  = GetConfirmedOffset("UObject::NamePrivate");
+    int32_t childPropOff = GetConfirmedOffset("UStruct::ChildProperties");
+    int32_t ffClassOff   = GetConfirmedOffset("FField::ClassPrivate");
+    int32_t ffNextOff    = GetConfirmedOffset("FField::Next");
+    if (fpropSize < 0 || classOff < 0 || namePrivOff < 0 || childPropOff < 0 ||
+        ffClassOff < 0 || ffNextOff < 0) {
+        PDBG("ProbeFEnumPropertyLayout: 依赖偏移未确认 (Size/Class/Name/ChildProps/FF.Class/FF.Next), 中止");
+        PDBG("<<<<<<<<<< [ProbeFEnumPropertyLayout] END <<<<<<<<<<");
+        return;
+    }
+    // FEnumProperty tail lives at SubPropertyBase when known (DFM padded layout),
+    // else at FProperty.Size (standard layout).
+    int32_t base = (subBaseOff > 0) ? subBaseOff : fpropSize;
+    PDBG("ProbeFEnumPropertyLayout: base=0x{:X} (sizeof=0x{:X}, subBase=0x{:X})",
+         base, fpropSize, subBaseOff);
+
+    // ---------- Anchor: walk GObjects for any FEnumProperty instance ----------
+    if (!m_FFEnumProp) {
+        int32_t count = UObject::GObjects->Num();
+        PDBG("ProbeFEnumPropertyLayout: 扫 GObjects 找 FEnumProperty 锚点 (Num={})", count);
+        int32_t scanned = 0, eligibleStructs = 0, walkedFields = 0;
+        for (int32_t i = 1; i < count && !m_FFEnumProp; ++i) {
+            uintptr_t obj = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(i));
+            if (!IsValidPtr(obj)) continue;
+            ++scanned;
+            uintptr_t cls = 0;
+            if (!KMgrRead(obj + classOff, &cls, 8) || !IsValidPtr(cls)) continue;
+            std::string clsName;
+            if (!TryReadFName(cls + namePrivOff, clsName)) continue;
+            // Only walk reflection-bearing classes (have ChildProperties)
+            if (!FNameEq(clsName, "Class") && !FNameEq(clsName, "ScriptStruct") &&
+                !FNameEq(clsName, "BlueprintGeneratedClass"))
+                continue;
+            ++eligibleStructs;
+
+            uintptr_t prop = 0;
+            if (!KMgrRead(obj + childPropOff, &prop, 8) || !IsValidPtr(prop)) continue;
+            for (int32_t hop = 0; hop < 64 && IsValidPtr(prop); ++hop) {
+                ++walkedFields;
+                uintptr_t fcls = 0;
+                if (!KMgrRead(prop + ffClassOff, &fcls, 8) || !IsValidPtr(fcls)) break;
+                std::string fclsName;
+                if (TryReadFName(fcls, fclsName) && FNameEq(fclsName, "EnumProperty")) {
+                    m_FFEnumProp = prop;
+                    PDBG("ProbeFEnumPropertyLayout: 锚点命中 obj[{}]=0x{:X} prop=0x{:X} (scanned={} eligible={} walked={})",
+                         i, obj, prop, scanned, eligibleStructs, walkedFields);
+                    break;
+                }
+                uintptr_t next = 0;
+                if (!KMgrRead(prop + ffNextOff, &next, 8)) break;
+                prop = next;
+            }
+        }
+        if (!m_FFEnumProp) {
+            PDBG("ProbeFEnumPropertyLayout: 未找到 FEnumProperty 锚点 (scanned={} eligible={} walked={}), cascade fallback 生效",
+                 scanned, eligibleStructs, walkedFields);
+        }
+    }
+    if (!m_FFEnumProp) {
+        PDBG("<<<<<<<<<< [ProbeFEnumPropertyLayout] END <<<<<<<<<<");
+        return;
+    }
+
+    // ---------- Identify which slot holds UnderlyingType (backing FProperty) vs Enum (UEnum) ----------
+    auto isBackingProp = [&](uintptr_t ptr) -> bool {
+        if (!IsValidPtr(ptr)) return false;
+        uintptr_t fcls = 0;
+        if (!KMgrRead(ptr + ffClassOff, &fcls, 8) || !IsValidPtr(fcls)) return false;
+        std::string fclsName;
+        if (!TryReadFName(fcls, fclsName)) return false;
+        // UE enum backing types: ByteProperty (default), or sized int variants.
+        return FNameEq(fclsName, "ByteProperty")    || FNameEq(fclsName, "IntProperty")    ||
+               FNameEq(fclsName, "Int8Property")    || FNameEq(fclsName, "Int16Property")  ||
+               FNameEq(fclsName, "Int64Property")   || FNameEq(fclsName, "UInt16Property") ||
+               FNameEq(fclsName, "UInt32Property")  || FNameEq(fclsName, "UInt64Property");
+    };
+    auto isUEnum = [&](uintptr_t ptr) -> bool {
+        if (!IsValidPtr(ptr)) return false;
+        uintptr_t cls = 0;
+        if (!KMgrRead(ptr + classOff, &cls, 8) || !IsValidPtr(cls)) return false;
+        std::string clsName;
+        if (!TryReadFName(cls + namePrivOff, clsName)) return false;
+        return FNameEq(clsName, "Enum");
+    };
+
+    uintptr_t p0 = 0, p8 = 0;
+    KMgrRead(m_FFEnumProp + base + 0, &p0, 8);
+    KMgrRead(m_FFEnumProp + base + 8, &p8, 8);
+    // Anchor on whichever slot is a confirmed UEnum — UnderlyingProp's other slot
+    // may be a valid backing FProperty *or* nullptr (UE sets it null for the
+    // default uint8 backing case to save memory). Both arrangements are legal.
+    auto isUnderlyingOrNull = [&](uintptr_t ptr) -> bool {
+        return ptr == 0 || isBackingProp(ptr);
+    };
+    bool layoutStd = isUEnum(p8) && isUnderlyingOrNull(p0); // UnderlyingType @ +0, Enum @ +8
+    bool layoutAlt = isUEnum(p0) && isUnderlyingOrNull(p8); // Enum @ +0, UnderlyingType @ +8
+
+    int32_t underlyingOff = -1, enumOff = -1;
+    std::string desc;
+    if (layoutStd && !layoutAlt) {
+        underlyingOff = base + 0; enumOff = base + 8;
+        desc = std::format("standard: backing FProperty @ +0x{:X}, UEnum @ +0x{:X}", base, base + 8);
+    } else if (layoutAlt && !layoutStd) {
+        enumOff = base + 0; underlyingOff = base + 8;
+        desc = std::format("alternate: UEnum @ +0x{:X}, backing FProperty @ +0x{:X}", base, base + 8);
+    } else {
+        PDBG("ProbeFEnumPropertyLayout: 无法确定 layout (std={}, alt={}, p0=0x{:X}, p8=0x{:X}), 跳过",
+             layoutStd, layoutAlt, p0, p8);
+        PDBG("<<<<<<<<<< [ProbeFEnumPropertyLayout] END <<<<<<<<<<");
+        return;
+    }
+
+    {
+        auto& rU = GetResult("FEnumProperty::UnderlyingType");
+        rU.offset = underlyingOff; rU.size = 8; rU.typeName = "FProperty*";
+        rU.evidence = desc; rU.autoDetected = true; rU.confirmed = true;
+    }
+    {
+        auto& rE = GetResult("FEnumProperty::Enum");
+        rE.offset = enumOff; rE.size = 8; rE.typeName = "UEnum*";
+        rE.evidence = desc; rE.autoDetected = true; rE.confirmed = true;
+    }
+    PDBG("ProbeFEnumPropertyLayout: 选定 UnderlyingType=0x{:X}, Enum=0x{:X} ({})",
+         underlyingOff, enumOff, desc);
+    PDBG("<<<<<<<<<< [ProbeFEnumPropertyLayout] END <<<<<<<<<<");
+}
+
 void UEProber::Phase5_AutoProbe() {
     if (!m_GameDetected) { PDBG("请先检测游戏后再进行探测操作"); return; }
     m_PhaseStatus[5] = EPhaseStatus::InProgress;
@@ -3193,6 +3327,14 @@ void UEProber::Phase5_AutoProbe() {
                     PDBG("---------- [Step 10/11] sizeof(FProperty) ----------");
                     Phase5_ProbeFPropertySize();
                     PDBG("Phase5: sizeof(FProperty) => has={}, confirmed={}", HasResult("sizeof(FProperty)"), HasConfirmed("sizeof(FProperty)"));
+
+                    // ---------- [Step 10.5] FEnumProperty layout ----------
+                    PDBG("---------- [Step 10.5] FEnumProperty layout ----------");
+                    Phase5_ProbeFEnumPropertyLayout();
+                    PDBG("Phase5: FEnumProperty::UnderlyingType => has={}, confirmed={}",
+                         HasResult("FEnumProperty::UnderlyingType"), HasConfirmed("FEnumProperty::UnderlyingType"));
+                    PDBG("Phase5: FEnumProperty::Enum => has={}, confirmed={}",
+                         HasResult("FEnumProperty::Enum"), HasConfirmed("FEnumProperty::Enum"));
                 } else {
                     PDBG("Phase5: Offset_Internal 无结果, 跳过后续步骤");
                 }
@@ -4522,6 +4664,8 @@ void UEProber::StartDump() {
     if (HasConfirmed("FProperty::Offset_Internal")) offsets.fpropOffset = GetConfirmedOffset("FProperty::Offset_Internal");
     if (HasConfirmed("sizeof(FProperty)"))        offsets.fpropSize    = GetConfirmedOffset("sizeof(FProperty)");
     if (HasConfirmed("FProperty::SubPropertyBase")) offsets.fpropSubBase = GetConfirmedOffset("FProperty::SubPropertyBase");
+    if (HasConfirmed("FEnumProperty::UnderlyingType")) offsets.fenumUnderlying = GetConfirmedOffset("FEnumProperty::UnderlyingType");
+    if (HasConfirmed("FEnumProperty::Enum"))           offsets.fenumEnum       = GetConfirmedOffset("FEnumProperty::Enum");
 
     StartDumpWithProbedOffsets(offsets, m_DumpStatus, m_DumpError, m_DumpOutputDir);
 }

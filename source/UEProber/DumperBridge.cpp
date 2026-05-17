@@ -306,15 +306,16 @@ void StartDumpWithProbedOffsets(
     if (offsets.fpropSize)     probedUEOffsets.FProperty.Size = offsets.fpropSize;
     if (offsets.fpropSubBase) {
         probedUEOffsets.FProperty.SubPropertyBase = offsets.fpropSubBase;
-        // Cascade: FEnumProperty tail default in UE_Offsets is computed from
-        // FProperty.Size (pre-leading-metadata correction). When SubPropertyBase
-        // diverges (DFM-style padded layout), slide FEnumProperty.UnderlyingType
-        // and .Enum onto the corrected base too. Assumes standard order
-        // (UnderlyingType first, Enum at +8). When the dedicated FEnumProperty
-        // layout probe (S6) lands, that will overwrite these.
+        // Cascade fallback for FEnumProperty when S6's dedicated probe didn't
+        // confirm UnderlyingType / Enum (e.g. no FEnumProperty exists in the
+        // GObjects window). Assumes standard order (UnderlyingType first, Enum
+        // at +8); explicit fenumUnderlying / fenumEnum below take precedence
+        // and override this for games whose layout is reversed.
         probedUEOffsets.FEnumProperty.UnderlyingType = offsets.fpropSubBase;
         probedUEOffsets.FEnumProperty.Enum = offsets.fpropSubBase + sizeof(void *);
     }
+    if (offsets.fenumUnderlying) probedUEOffsets.FEnumProperty.UnderlyingType = offsets.fenumUnderlying;
+    if (offsets.fenumEnum)       probedUEOffsets.FEnumProperty.Enum = offsets.fenumEnum;
 
     // Apply probed offsets to the matched Ex profile
     g_ExProfile->SetProbedOffsets(probedUEOffsets);

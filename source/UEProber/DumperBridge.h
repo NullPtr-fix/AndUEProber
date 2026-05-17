@@ -62,6 +62,8 @@ struct ProbedOffsets {
     uintptr_t fpropArrayDim = 0, fpropElemSize = 0, fpropFlags = 0, fpropOffset = 0, fpropSize = 0;
     // FProperty 派生类 tail 起点 (DFM leading metadata: ≠ fpropSize)
     uintptr_t fpropSubBase = 0;
+    // FEnumProperty UnderlyingType / Enum 偏移 (双布局变体)
+    uintptr_t fenumUnderlying = 0, fenumEnum = 0;
 };
 
 // Set probed offsets into the matched profile, then run UEDumper.Init + Dump.

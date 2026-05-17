@@ -42,7 +42,7 @@
 #include "UE/UEGameProfiles/Auroria.hpp"
 #include "UE/UEGameProfiles/LineageW.hpp"
 #include "UE/UEGameProfiles/RLSideswipe.hpp"
-#include "UE/UEGameProfiles/PUBG.hpp"
+#include "GameProfiles/PUBG.hpp"
 #include "GameProfiles/DeltaForce.hpp"
 #include "GameProfiles/NiZhan.hpp"
 #include "GameProfiles/RocoKingdom.hpp"
@@ -304,6 +304,17 @@ void StartDumpWithProbedOffsets(
     if (offsets.fpropFlags)    probedUEOffsets.FProperty.PropertyFlags = offsets.fpropFlags;
     if (offsets.fpropOffset)   probedUEOffsets.FProperty.Offset_Internal = offsets.fpropOffset;
     if (offsets.fpropSize)     probedUEOffsets.FProperty.Size = offsets.fpropSize;
+    if (offsets.fpropSubBase) {
+        probedUEOffsets.FProperty.SubPropertyBase = offsets.fpropSubBase;
+        // Cascade: FEnumProperty tail default in UE_Offsets is computed from
+        // FProperty.Size (pre-leading-metadata correction). When SubPropertyBase
+        // diverges (DFM-style padded layout), slide FEnumProperty.UnderlyingType
+        // and .Enum onto the corrected base too. Assumes standard order
+        // (UnderlyingType first, Enum at +8). When the dedicated FEnumProperty
+        // layout probe (S6) lands, that will overwrite these.
+        probedUEOffsets.FEnumProperty.UnderlyingType = offsets.fpropSubBase;
+        probedUEOffsets.FEnumProperty.Enum = offsets.fpropSubBase + sizeof(void *);
+    }
 
     // Apply probed offsets to the matched Ex profile
     g_ExProfile->SetProbedOffsets(probedUEOffsets);

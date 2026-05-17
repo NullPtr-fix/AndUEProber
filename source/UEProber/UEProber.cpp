@@ -3019,6 +3019,12 @@ void UEProber::Phase5_ProbeFPropertySize() {
     PDBG("ProbePropSize: 候选数={}", m_Phase5FPropSizeCandidates.size());
     if (!m_Phase5FPropSizeCandidates.empty() && m_Phase5FPropSizeCandidates[0].confidence >= 0.7f) {
         auto& best = m_Phase5FPropSizeCandidates[0];
+        // SubPropertyBase = first-known-pointer offset captured BEFORE any leading-metadata
+        // correction below. On standard UE layouts this equals sizeof(FProperty); on games
+        // with leading-metadata padding (DeltaForce 1.201+) it's larger by the pad size and
+        // is the correct anchor for FObjectPropertyBase / FStructProperty / FArrayProperty
+        // / etc. derived-class tail data emitted by the dumper synthesize step.
+        int32_t subPropBaseOff = best.offset;
         int32_t finalOff = best.offset;
         std::string finalDesc = best.description;
 
@@ -3090,6 +3096,17 @@ void UEProber::Phase5_ProbeFPropertySize() {
         if (best.confidence >= 1.0f) r.confirmed = true;
         PDBG("ProbePropSize: 选定 offset=0x{:X}, conf={:.2f}, confirmed={}",
              finalOff, best.confidence, r.confirmed);
+
+        // SubPropertyBase — same scan, captured pre-correction. Promoted to confirmed
+        // on the same confidence threshold as sizeof(FProperty); the two share a
+        // signal source (best.confidence) so confirming them together is correct.
+        auto& rSub = GetResult("FProperty::SubPropertyBase");
+        rSub.offset = subPropBaseOff; rSub.size = 0; rSub.typeName = "offset";
+        rSub.evidence = std::format("first-known-pointer offset in FStructProperty / FObjectPropertyBase tail (pre-correction)");
+        rSub.autoDetected = true;
+        if (best.confidence >= 1.0f) rSub.confirmed = true;
+        PDBG("ProbePropSize: SubPropertyBase=0x{:X} (sizeof=0x{:X}, gap={})",
+             subPropBaseOff, finalOff, subPropBaseOff - finalOff);
     } else {
         PDBG("ProbePropSize: 无满足阈值的候选 (最佳 conf={:.2f})",
              m_Phase5FPropSizeCandidates.empty() ? 0.0f : m_Phase5FPropSizeCandidates[0].confidence);
@@ -4504,6 +4521,7 @@ void UEProber::StartDump() {
     if (HasConfirmed("FProperty::PropertyFlags")) offsets.fpropFlags    = GetConfirmedOffset("FProperty::PropertyFlags");
     if (HasConfirmed("FProperty::Offset_Internal")) offsets.fpropOffset = GetConfirmedOffset("FProperty::Offset_Internal");
     if (HasConfirmed("sizeof(FProperty)"))        offsets.fpropSize    = GetConfirmedOffset("sizeof(FProperty)");
+    if (HasConfirmed("FProperty::SubPropertyBase")) offsets.fpropSubBase = GetConfirmedOffset("FProperty::SubPropertyBase");
 
     StartDumpWithProbedOffsets(offsets, m_DumpStatus, m_DumpError, m_DumpOutputDir);
 }

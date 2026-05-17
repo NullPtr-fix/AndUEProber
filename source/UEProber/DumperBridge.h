@@ -60,6 +60,8 @@ struct ProbedOffsets {
     uintptr_t ffieldClass = 0, ffieldNext = 0, ffieldName = 0, ffieldFlags = 0;
     // FProperty
     uintptr_t fpropArrayDim = 0, fpropElemSize = 0, fpropFlags = 0, fpropOffset = 0, fpropSize = 0;
+    // FProperty 派生类 tail 起点 (DFM leading metadata: ≠ fpropSize)
+    uintptr_t fpropSubBase = 0;
 };
 
 // Set probed offsets into the matched profile, then run UEDumper.Init + Dump.

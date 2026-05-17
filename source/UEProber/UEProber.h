@@ -131,6 +131,11 @@ private:
     void Phase5_ProbeFPropertyArrayDimAndElementSize();
     void Phase5_ProbeFPropertyFlags();
     void Phase5_ProbeFPropertyOffsetInternal();
+    // Probes both sizeof(FProperty) (true 8-aligned size, after leading-metadata
+    // correction) and FProperty::SubPropertyBase (first-known-pointer offset =
+    // where derived-class tail data actually lives). They're the same value on
+    // standard UE layouts, and differ by the leading-metadata pad on games like
+    // DeltaForce. Both results are written into the result map in one pass.
     void Phase5_ProbeFPropertySize();
 
     // ======================== 阶段 6: ProcessEvent VTable ========================

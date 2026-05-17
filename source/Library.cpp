@@ -6,6 +6,7 @@
 #include "AndroidPlatform/LooperDispatcher.h"
 #include "ImGui/ImGuiHost.h"
 #include "InputEvent/InputEventHook.h"
+#include "UEProber/DumperBridge.h"
 #include "UEProber/UEProber.h"
 #include "Utils/Config/Config.h"
 #include "Utils/CrashHandler/CrashHandler.h"
@@ -68,6 +69,30 @@ void main_thread()
 	});
 	g_MainLooperDispatcher.post([]() { g_MainLooperDispatcher.cleanup(); });
 
+	// AUTO-DUMP: temporary scaffold to validate reflection-emit refactor end-to-end
+	// without touching the in-game ImGui UI (DFM filters injected touch input).
+	// Remove once UI tap path is solved or after S5/S6 ships.
+	std::thread([]()
+	{
+		std::this_thread::sleep_for(std::chrono::seconds(4));
+		LOGI("[AutoDump] === BEGIN ===");
+		auto& prober = UEProber::GetInstance();
+		prober.RunAutoDumpFlow();
+		for (int i = 0; i < 120; ++i) {
+			auto st = prober.GetDumpStatus();
+			if (st == EDumpStatus::Success) {
+				LOGI("[AutoDump] === SUCCESS === out=%s", prober.GetDumpOutputDir().c_str());
+				return;
+			}
+			if (st == EDumpStatus::Failed) {
+				LOGE("[AutoDump] === FAILED === err=%s", prober.GetDumpError().c_str());
+				return;
+			}
+			std::this_thread::sleep_for(std::chrono::seconds(1));
+		}
+		LOGE("[AutoDump] TIMEOUT after 120s (status still Running)");
+	}).detach();
+
 	InputEventHook::Initialize([](AInputEvent* event)
 	{
 		if (!event) return;
@@ -99,7 +124,7 @@ static std::atomic<bool> g_Initialized{false};
 extern "C" jint JNIEXPORT JNI_OnLoad(JavaVM* vm, void* key)
 {
 	// key 1337 is passed by injector
-	if (key != (void*)1337)
+	if (key != (void*)20030331)
 		return JNI_VERSION_1_6;
 
 	LOGI("JNI_OnLoad called by injector.");

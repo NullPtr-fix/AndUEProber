@@ -4395,6 +4395,26 @@ void UEProber::DrawDumpPanel() {
         ImGui::TextColored(ImVec4(1.0f, 0.7f, 0.2f, 1.0f), "未探测到偏移, 将使用 AndUEDumper 预设偏移。");
 }
 
+void UEProber::RunAutoDumpFlow() {
+    PDBG("[AutoDump] DetectGame...");
+    DetectGame();
+    if (!m_GameDetected) {
+        PDBG("[AutoDump] DetectGame failed; aborting flow");
+        m_DumpError = "DetectGame failed";
+        m_DumpStatus.store(EDumpStatus::Failed);
+        return;
+    }
+    PDBG("[AutoDump] Phase1~6 AutoProbe...");
+    Phase1_AutoProbe();
+    Phase2_AutoProbe();
+    Phase3_AutoProbe();
+    Phase4_AutoProbe();
+    Phase5_AutoProbe();
+    Phase6_AutoProbe();
+    PDBG("[AutoDump] AutoProbe phases done; invoking StartDump");
+    StartDump();
+}
+
 void UEProber::DetectGame() {
     if (m_GameDetected) return;
 

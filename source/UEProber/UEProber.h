@@ -25,6 +25,16 @@ public:
 
     void Draw(bool* p_open = nullptr);
 
+    // Headless one-shot orchestration: DetectGame → Phase1~6 AutoProbe → StartDump.
+    // For automated validation paths that bypass the ImGui UI (e.g. DFM filters
+    // injected touch input). Returns immediately; StartDump runs on a detached
+    // worker. Poll status via the getters below.
+    void RunAutoDumpFlow();
+
+    EDumpStatus GetDumpStatus() const { return m_DumpStatus.load(); }
+    const std::string& GetDumpError() const { return m_DumpError; }
+    const std::string& GetDumpOutputDir() const { return m_DumpOutputDir; }
+
     // ======================== 探测结果数据 ========================
 
     // 单个偏移量探测结果

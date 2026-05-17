@@ -120,6 +120,8 @@ Correct UE 4.25+ layout is `VTable@0, ClassPrivate@8, Owner@0x10(0x10), Next@0x2
 
 **Suggested fix** (in dumper `fieldsFor`): emit Owner conditionally based on whether `offs.FField.ClassPrivate < 0x18`. If yes, ClassPrivate sits at 0x8 → Owner moves to 0x10. Equivalent: add `FField.Owner` to UE_Offsets as a new probed/defaulted field, drop the hardcode.
 
+**Status**: addressed in `external/AndUEDumper` `andueprober` branch. Picked the `ClassPrivate < 0x18` branch in `fieldsFor("FField")` (1-line if). Verified on Valorant (Owner now @ 0x10, no overlap with ClassPrivate @ 0x8) and DFM (byte-for-byte identical to pre-fix baseline). doc §3.4 + §5 updated to describe both layouts.
+
 ### †2 — FProperty.ArrayDim dropped because `SizeOf(FField)` over-aligns
 
 Prober finds `FProperty.ArrayDim=0x34` on all three games. The dumper computes `SizeOf(FField) = align(FlagsPrivate + 4, 8) = align(0x34, 8) = 0x38` (reflection-emit.md §4.3). Augment treats `Inherited=0x38` as the FProperty boundary and erases any FProperty field with offset `< 0x38`.

@@ -118,9 +118,11 @@ After augment sorts by offset, the emit ends up with VTable@0, Owner@8(0x10), Cl
 
 Correct UE 4.25+ layout is `VTable@0, ClassPrivate@8, Owner@0x10(0x10), Next@0x20, ...` (i.e. ClassPrivate comes before Owner). DFM has the opposite order (`VTable, Owner, Next, ClassPrivate, ...`), and on DFM the hardcoded `Owner@8` happens to match, which is why this anomaly didn't surface in S5/S6.
 
-**Suggested fix** (in dumper `fieldsFor`): emit Owner conditionally based on whether `offs.FField.ClassPrivate < 0x18`. If yes, ClassPrivate sits at 0x8 → Owner moves to 0x10. Equivalent: add `FField.Owner` to UE_Offsets as a new probed/defaulted field, drop the hardcode.
+**Root cause is plumbing, not algorithm**: the prober's `Phase5_ProbeFFieldOwner` correctly probes Owner @ 0x10 on Valorant (confidence 1.0, 3-way validation EntryPoint/DeltaSeconds/bIsUObject). But `UE_Offsets.FField` had no `Owner` field, so `DumperBridge::ProbedOffsets` had no `ffieldOwner` field, so the probed value never reached the dumper. `fieldsFor("FField")` then hardcoded `Owner @ 0x8` — coincidentally right for DFM, broken for standard.
 
-**Status**: addressed in `external/AndUEDumper` `andueprober` branch. Picked the `ClassPrivate < 0x18` branch in `fieldsFor("FField")` (1-line if). Verified on Valorant (Owner now @ 0x10, no overlap with ClassPrivate @ 0x8) and DFM (byte-for-byte identical to pre-fix baseline). doc §3.4 + §5 updated to describe both layouts.
+**Fix** (proper architecture, in `external/AndUEDumper` `andueprober` branch + `source/UEProber` bridge): add `UE_Offsets.FField.Owner` with defaults (UE 4.25+ = `ClassPrivate + 8`, DFM override = `8`), add `ffieldOwner` to `DumperBridge::ProbedOffsets`, wire it through in `StartDumpWithProbedOffsets`, and pass `GetConfirmedOffset("FField::Owner")` from `UEProber::StartDump`. `fieldsFor("FField")` now reads `offs.FField.Owner` directly — no heuristic.
+
+**Status**: shipped. Verified on Valorant (Owner @ 0x10, no overlap with ClassPrivate @ 0x8) and DFM (byte-for-byte identical to pre-fix baseline). doc §3.2 (new `FField.Owner` row) + §3.4 + §5 updated. Supersedes the earlier `(ClassPrivate < 0x18) ? 0x10 : 0x8` heuristic from submodule `135172e` — that commit stays in git history but its emit logic is replaced.
 
 ### †2 — FProperty.ArrayDim dropped because `SizeOf(FField)` over-aligns
 

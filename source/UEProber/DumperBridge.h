@@ -58,6 +58,7 @@ struct ProbedOffsets {
     uintptr_t funcFlags = 0, funcNumParams = 0, funcParamSize = 0, funcFunc = 0;
     // FField
     uintptr_t ffieldClass = 0, ffieldNext = 0, ffieldName = 0, ffieldFlags = 0;
+    uintptr_t ffieldOwner = 0;  // FFieldVariant Owner offset (prober Phase5_ProbeFFieldOwner)
     // FProperty
     uintptr_t fpropArrayDim = 0, fpropElemSize = 0, fpropFlags = 0, fpropOffset = 0, fpropSize = 0;
     // FProperty 派生类 tail 起点 (DFM leading metadata: ≠ fpropSize)

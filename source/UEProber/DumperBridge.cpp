@@ -298,6 +298,7 @@ void StartDumpWithProbedOffsets(
     if (offsets.ffieldNext)  probedUEOffsets.FField.Next = offsets.ffieldNext;
     if (offsets.ffieldName)  probedUEOffsets.FField.NamePrivate = offsets.ffieldName;
     if (offsets.ffieldFlags) probedUEOffsets.FField.FlagsPrivate = offsets.ffieldFlags;
+    if (offsets.ffieldOwner) probedUEOffsets.FField.Owner = offsets.ffieldOwner;
 
     if (offsets.fpropArrayDim) probedUEOffsets.FProperty.ArrayDim = offsets.fpropArrayDim;
     if (offsets.fpropElemSize) probedUEOffsets.FProperty.ElementSize = offsets.fpropElemSize;

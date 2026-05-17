@@ -4653,6 +4653,7 @@ void UEProber::StartDump() {
 
     // FField
     if (HasConfirmed("FField::ClassPrivate"))     offsets.ffieldClass = GetConfirmedOffset("FField::ClassPrivate");
+    if (HasConfirmed("FField::Owner"))            offsets.ffieldOwner = GetConfirmedOffset("FField::Owner");
     if (HasConfirmed("FField::Next"))             offsets.ffieldNext  = GetConfirmedOffset("FField::Next");
     if (HasConfirmed("FField::NamePrivate"))      offsets.ffieldName  = GetConfirmedOffset("FField::NamePrivate");
     if (HasConfirmed("FField::FlagsPrivate"))     offsets.ffieldFlags = GetConfirmedOffset("FField::FlagsPrivate");

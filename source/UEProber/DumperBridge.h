@@ -65,6 +65,13 @@ struct ProbedOffsets {
     uintptr_t fpropSubBase = 0;
     // FEnumProperty UnderlyingType / Enum 偏移 (双布局变体)
     uintptr_t fenumUnderlying = 0, fenumEnum = 0;
+    // FArray/FSet/FMap tail inner-property 偏移 (per-subclass override of fpropSubBase).
+    // DFM-style alt: individual container subclasses have their own per-class
+    // leading-metadata pad that the global fpropSubBase value doesn't capture
+    // (prober Phase5_ProbeFContainerPropertyTails).
+    uintptr_t farrayInner = 0;
+    uintptr_t fsetElement = 0;
+    uintptr_t fmapKey = 0, fmapValue = 0;
 };
 
 // Set probed offsets into the matched profile, then run UEDumper.Init + Dump.

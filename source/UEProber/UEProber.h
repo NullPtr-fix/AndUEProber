@@ -143,6 +143,14 @@ private:
     // each candidate slot's FField::ClassPrivate name. Writes both result keys
     // when one ordering uniquely matches.
     void Phase5_ProbeFEnumPropertyLayout();
+    // FArrayProperty.Inner / FSetProperty.ElementProp / FMapProperty.{Key,Value}Prop
+    // tail-pointer offsets. Walks GObjects for one instance of each subclass and
+    // scans candidate tail slots (SubPropertyBase, FProperty.Size, Size+8…) until
+    // one reads as a valid inner FProperty (validated by FField.ClassPrivate name
+    // matching a known property-class FName). Recovers DFM-style alt layouts where
+    // individual container subclasses have leading-metadata pads that differ from
+    // the global SubPropertyBase value probed via FStructProperty/FObjectPropertyBase.
+    void Phase5_ProbeFContainerPropertyTails();
 
     // ======================== 阶段 6: ProcessEvent VTable ========================
 

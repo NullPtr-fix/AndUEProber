@@ -318,6 +318,14 @@ void StartDumpWithProbedOffsets(
     if (offsets.fenumUnderlying) probedUEOffsets.FEnumProperty.UnderlyingType = offsets.fenumUnderlying;
     if (offsets.fenumEnum)       probedUEOffsets.FEnumProperty.Enum = offsets.fenumEnum;
 
+    // Per-subclass container tail offsets. Written AFTER SubPropertyBase so the
+    // more-specific value wins. Dumper synthesize + runtime getters both prefer
+    // these when non-zero, falling back to SubPropertyBase otherwise.
+    if (offsets.farrayInner) probedUEOffsets.FArrayProperty.Inner       = offsets.farrayInner;
+    if (offsets.fsetElement) probedUEOffsets.FSetProperty.ElementProp   = offsets.fsetElement;
+    if (offsets.fmapKey)     probedUEOffsets.FMapProperty.KeyProp       = offsets.fmapKey;
+    if (offsets.fmapValue)   probedUEOffsets.FMapProperty.ValueProp     = offsets.fmapValue;
+
     // Apply probed offsets to the matched Ex profile
     g_ExProfile->SetProbedOffsets(probedUEOffsets);
 

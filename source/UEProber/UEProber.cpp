@@ -3248,6 +3248,173 @@ void UEProber::Phase5_ProbeFEnumPropertyLayout() {
     PDBG("<<<<<<<<<< [ProbeFEnumPropertyLayout] END <<<<<<<<<<");
 }
 
+void UEProber::Phase5_ProbeFContainerPropertyTails() {
+    PDBG(">>>>>>>>>> [ProbeFContainerPropertyTails] BEGIN >>>>>>>>>>");
+
+    int32_t fpropSize    = GetConfirmedOffset("sizeof(FProperty)");
+    int32_t subBaseOff   = GetConfirmedOffset("FProperty::SubPropertyBase");
+    int32_t classOff     = GetConfirmedOffset("UObject::ClassPrivate");
+    int32_t namePrivOff  = GetConfirmedOffset("UObject::NamePrivate");
+    int32_t childPropOff = GetConfirmedOffset("UStruct::ChildProperties");
+    int32_t ffClassOff   = GetConfirmedOffset("FField::ClassPrivate");
+    int32_t ffNextOff    = GetConfirmedOffset("FField::Next");
+    if (fpropSize < 0 || classOff < 0 || namePrivOff < 0 || childPropOff < 0 ||
+        ffClassOff < 0 || ffNextOff < 0) {
+        PDBG("ProbeContainerTails: 依赖偏移未确认 (Size/Class/Name/ChildProps/FF.Class/FF.Next), 中止");
+        PDBG("<<<<<<<<<< [ProbeFContainerPropertyTails] END <<<<<<<<<<");
+        return;
+    }
+
+    // Candidate tail-slot offsets, priority order: probed SubPropertyBase first
+    // (works for non-DFM-alt subclasses), then FProperty.Size and nearby slots
+    // for derived classes that have their own per-class leading-metadata pad.
+    std::vector<int32_t> candidates;
+    if (subBaseOff > 0) candidates.push_back(subBaseOff);
+    for (int32_t step = 0; step <= 0x18; step += 8) {
+        int32_t cand = fpropSize + step;
+        if (std::find(candidates.begin(), candidates.end(), cand) == candidates.end())
+            candidates.push_back(cand);
+    }
+    PDBG("ProbeContainerTails: 候选偏移列表 [{}]: ",
+         (int)candidates.size());
+    for (int32_t c : candidates) PDBG("    +0x{:X}", c);
+
+    // Known FProperty subclass FFieldClass names. Validates that the pointer
+    // read out of a tail slot is actually an inner FProperty (vs random bytes).
+    static const char* kKnownPropertyClassNames[] = {
+        "Property",
+        "ArrayProperty", "SetProperty", "MapProperty",
+        "ObjectProperty", "ObjectPtrProperty", "ClassProperty",
+        "StructProperty", "ByteProperty", "BoolProperty",
+        "FloatProperty", "DoubleProperty",
+        "IntProperty", "Int8Property", "Int16Property", "Int64Property",
+        "UInt16Property", "UInt32Property", "UInt64Property", "Int32Property",
+        "NameProperty", "StrProperty", "TextProperty",
+        "DelegateProperty", "MulticastDelegateProperty",
+        "MulticastInlineDelegateProperty", "MulticastSparseDelegateProperty",
+        "InterfaceProperty", "WeakObjectProperty", "LazyObjectProperty",
+        "SoftObjectProperty", "SoftClassProperty",
+        "FieldPathProperty", "EnumProperty",
+    };
+    auto isKnownPropClass = [&](const std::string& s) {
+        for (const char* n : kKnownPropertyClassNames) {
+            if (FNameEq(s, n)) return true;
+        }
+        return false;
+    };
+    auto isInnerFProperty = [&](uintptr_t ptr) -> bool {
+        if (!IsValidPtr(ptr)) return false;
+        uintptr_t fcls = 0;
+        if (!KMgrRead(ptr + ffClassOff, &fcls, 8) || !IsValidPtr(fcls)) return false;
+        std::string fclsName;
+        if (!TryReadFName(fcls, fclsName)) return false;
+        return isKnownPropClass(fclsName);
+    };
+
+    // Anchor finder: walk GObjects for first FProperty whose FFieldClass.Name
+    // matches `targetName`. Only walks reflection-bearing UClass / UScriptStruct
+    // since those have ChildProperties chains (FField linked list).
+    auto findAnchor = [&](const char* targetName) -> uintptr_t {
+        int32_t count = UObject::GObjects->Num();
+        int32_t scanned = 0, eligibleStructs = 0, walkedFields = 0;
+        for (int32_t i = 1; i < count; ++i) {
+            uintptr_t obj = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(i));
+            if (!IsValidPtr(obj)) continue;
+            ++scanned;
+            uintptr_t cls = 0;
+            if (!KMgrRead(obj + classOff, &cls, 8) || !IsValidPtr(cls)) continue;
+            std::string clsName;
+            if (!TryReadFName(cls + namePrivOff, clsName)) continue;
+            if (!FNameEq(clsName, "Class") && !FNameEq(clsName, "ScriptStruct") &&
+                !FNameEq(clsName, "BlueprintGeneratedClass"))
+                continue;
+            ++eligibleStructs;
+
+            uintptr_t prop = 0;
+            if (!KMgrRead(obj + childPropOff, &prop, 8) || !IsValidPtr(prop)) continue;
+            for (int32_t hop = 0; hop < 64 && IsValidPtr(prop); ++hop) {
+                ++walkedFields;
+                uintptr_t fcls = 0;
+                if (!KMgrRead(prop + ffClassOff, &fcls, 8) || !IsValidPtr(fcls)) break;
+                std::string fclsName;
+                if (TryReadFName(fcls, fclsName) && FNameEq(fclsName, targetName)) {
+                    PDBG("ProbeContainerTails: {} 锚点命中 obj[{}]=0x{:X} prop=0x{:X} (scanned={} eligible={} walked={})",
+                         targetName, i, obj, prop, scanned, eligibleStructs, walkedFields);
+                    return prop;
+                }
+                uintptr_t next = 0;
+                if (!KMgrRead(prop + ffNextOff, &next, 8)) break;
+                prop = next;
+            }
+        }
+        PDBG("ProbeContainerTails: {} 锚点未找到 (scanned={} eligible={} walked={})",
+             targetName, scanned, eligibleStructs, walkedFields);
+        return 0;
+    };
+
+    // Probe one container subclass: find first candidate offset whose slot reads
+    // as a valid inner FProperty. Returns the offset, or -1 if none.
+    auto probeContainerTail = [&](const char* targetName) -> int32_t {
+        uintptr_t anchor = findAnchor(targetName);
+        if (!anchor) return -1;
+        for (int32_t off : candidates) {
+            uintptr_t inner = 0;
+            if (!KMgrRead(anchor + off, &inner, 8)) continue;
+            if (isInnerFProperty(inner)) {
+                PDBG("ProbeContainerTails: {} tail @ +0x{:X}, inner=0x{:X}", targetName, off, inner);
+                return off;
+            }
+            PDBG("ProbeContainerTails: {} +0x{:X} -> 0x{:X} 非有效 inner FProperty", targetName, off, inner);
+        }
+        return -1;
+    };
+
+    // FArrayProperty.Inner
+    {
+        int32_t off = probeContainerTail("ArrayProperty");
+        if (off > 0) {
+            auto& r = GetResult("FArrayProperty::Inner");
+            r.offset = off; r.size = 8; r.typeName = "FProperty*";
+            r.evidence = std::format("FArrayProperty.Inner @ +0x{:X} via GObjects anchor + tail probe", off);
+            r.autoDetected = true; r.confirmed = true;
+        }
+    }
+
+    // FSetProperty.ElementProp
+    {
+        int32_t off = probeContainerTail("SetProperty");
+        if (off > 0) {
+            auto& r = GetResult("FSetProperty::ElementProp");
+            r.offset = off; r.size = 8; r.typeName = "FProperty*";
+            r.evidence = std::format("FSetProperty.ElementProp @ +0x{:X} via GObjects anchor + tail probe", off);
+            r.autoDetected = true; r.confirmed = true;
+        }
+    }
+
+    // FMapProperty.KeyProp + ValueProp (two consecutive slots; KeyProp at probed
+    // offset, ValueProp at +sizeof(void*)). UE puts both inner properties side
+    // by side; no game has been observed splitting them.
+    {
+        int32_t off = probeContainerTail("MapProperty");
+        if (off > 0) {
+            {
+                auto& r = GetResult("FMapProperty::KeyProp");
+                r.offset = off; r.size = 8; r.typeName = "FProperty*";
+                r.evidence = std::format("FMapProperty.KeyProp @ +0x{:X} via GObjects anchor + tail probe", off);
+                r.autoDetected = true; r.confirmed = true;
+            }
+            {
+                auto& r = GetResult("FMapProperty::ValueProp");
+                r.offset = off + (int32_t)sizeof(void *); r.size = 8; r.typeName = "FProperty*";
+                r.evidence = std::format("FMapProperty.ValueProp @ +0x{:X} (KeyProp + 8)", off + (int32_t)sizeof(void *));
+                r.autoDetected = true; r.confirmed = true;
+            }
+        }
+    }
+
+    PDBG("<<<<<<<<<< [ProbeFContainerPropertyTails] END <<<<<<<<<<");
+}
+
 void UEProber::Phase5_AutoProbe() {
     if (!m_GameDetected) { PDBG("请先检测游戏后再进行探测操作"); return; }
     m_PhaseStatus[5] = EPhaseStatus::InProgress;
@@ -3335,6 +3502,18 @@ void UEProber::Phase5_AutoProbe() {
                          HasResult("FEnumProperty::UnderlyingType"), HasConfirmed("FEnumProperty::UnderlyingType"));
                     PDBG("Phase5: FEnumProperty::Enum => has={}, confirmed={}",
                          HasResult("FEnumProperty::Enum"), HasConfirmed("FEnumProperty::Enum"));
+
+                    // ---------- [Step 10.6] FArray/FSet/FMap tail layouts ----------
+                    PDBG("---------- [Step 10.6] FArray/FSet/FMap tail layouts ----------");
+                    Phase5_ProbeFContainerPropertyTails();
+                    PDBG("Phase5: FArrayProperty::Inner => has={}, confirmed={}",
+                         HasResult("FArrayProperty::Inner"), HasConfirmed("FArrayProperty::Inner"));
+                    PDBG("Phase5: FSetProperty::ElementProp => has={}, confirmed={}",
+                         HasResult("FSetProperty::ElementProp"), HasConfirmed("FSetProperty::ElementProp"));
+                    PDBG("Phase5: FMapProperty::KeyProp => has={}, confirmed={}",
+                         HasResult("FMapProperty::KeyProp"), HasConfirmed("FMapProperty::KeyProp"));
+                    PDBG("Phase5: FMapProperty::ValueProp => has={}, confirmed={}",
+                         HasResult("FMapProperty::ValueProp"), HasConfirmed("FMapProperty::ValueProp"));
                 } else {
                     PDBG("Phase5: Offset_Internal 无结果, 跳过后续步骤");
                 }
@@ -4667,6 +4846,14 @@ void UEProber::StartDump() {
     if (HasConfirmed("FProperty::SubPropertyBase")) offsets.fpropSubBase = GetConfirmedOffset("FProperty::SubPropertyBase");
     if (HasConfirmed("FEnumProperty::UnderlyingType")) offsets.fenumUnderlying = GetConfirmedOffset("FEnumProperty::UnderlyingType");
     if (HasConfirmed("FEnumProperty::Enum"))           offsets.fenumEnum       = GetConfirmedOffset("FEnumProperty::Enum");
+
+    // Per-subclass container tail offsets (Step 10.6). Only override when the
+    // probe found a real instance; otherwise leave zero so the dumper falls
+    // back to fpropSubBase / runtime probe.
+    if (HasConfirmed("FArrayProperty::Inner"))      offsets.farrayInner = GetConfirmedOffset("FArrayProperty::Inner");
+    if (HasConfirmed("FSetProperty::ElementProp"))  offsets.fsetElement = GetConfirmedOffset("FSetProperty::ElementProp");
+    if (HasConfirmed("FMapProperty::KeyProp"))      offsets.fmapKey     = GetConfirmedOffset("FMapProperty::KeyProp");
+    if (HasConfirmed("FMapProperty::ValueProp"))    offsets.fmapValue   = GetConfirmedOffset("FMapProperty::ValueProp");
 
     StartDumpWithProbedOffsets(offsets, m_DumpStatus, m_DumpError, m_DumpOutputDir);
 }

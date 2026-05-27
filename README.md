@@ -1,9 +1,5 @@
 # AndUEProber
 
-[中文](#中文) | [English](#english)
-
----
-
 | Game | Version | GUObjectArray | DecryptFName | ProcessEventIdx |
 |------|---------|----------|--------------------|-----------------|
 | com.tencent.tmgp.dfm | ✅ | ✅ | ✅ | ✅ |
@@ -12,25 +8,19 @@
 | com.tencent.mf.uam | ✅ | ✅ | ✅ | ✅ |
 | com.tencent.tmgp.codev | ✅ | ✅ | ✅ | ✅ |
 
-## Screenshots
-
-| 探测结果总览 / Detection Results | Dump 结果 / Dump Result |
+| 探测结果总览 | Dump 结果 |
 |:---:|:---:|
 | ![results](misc/p2.jpg) | ![dump](misc/p3.jpg) |
 
-探测原理 / How it works: [ReverseUE.md](source/UEProber/UECore/ReverseUE.md)（文档部分内容可能未及时更新 / Some parts may be outdated）
+探测原理: [ReverseUE.md](source/UEProber/UECore/ReverseUE.md)（文档部分内容可能未及时更新 / Some parts may be outdated）
 
 ---
-
-<a id="中文"></a>
 
 ## 概述
 
 集成了 [AndUEDumper](https://github.com/MJx0/AndUEDumper)，
 UEProber 可与 AndUEDumper 无缝衔接 —— 探测完成后可直接触发 Dump，无需手动配置偏移，
 生成的 SDK 可直接通过 `#include "SDK_A/SDK.hpp"` 引入编译使用。
-
-> 已在 [AndUEChams](https://github.com/DumpA1n/AndUEChams) 中投入使用
 
 ## 构建
 
@@ -57,43 +47,6 @@ cmake --build build
 ```bash
 ./AndKittyInjector --package <包名> --libs libAndUEProber.so --memfd --hide --watch
 ```
-
----
-
-<a id="english"></a>
-
-## Overview
-
-Integrated [AndUEDumper](https://github.com/MJx0/AndUEDumper) — UEProber now works seamlessly with AndUEDumper. After probing completes, you can trigger a Dump directly without manual offset configuration. The generated SDK can be included via `#include "SDK_A/SDK.hpp"`.
-
-> Already used in [AndUEChams](https://github.com/DumpA1n/AndUEChams)
-
-## Build
-
-**Requirements:**
-- CMake 3.22.1+
-- Android NDK (ARM64-v8a, API 27+)
-
-```bash
-# Set NDK_HOME environment variable (replace with your actual NDK path)
-export NDK_HOME=/path/to/android-ndk
-git submodule update --init --recursive
-cmake -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
-cmake --build build
-```
-
-> **⚠️ Use Release build, otherwise injection may crash**
-
-Output: `libAndUEProber.so`
-
-## Usage
-
-Inject into a target app using [AndKittyInjector v5.1.0](https://github.com/MJx0/AndKittyInjector):
-
-```bash
-./AndKittyInjector --package <package_name> --libs libAndUEProber.so --memfd --hide --watch
-```
-
 ---
 
 ## Todo

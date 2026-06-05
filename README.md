@@ -52,6 +52,7 @@ cmake --build build
 ## Todo
 
 - [x] Auto-detect GUObjectArray / GetPlainANSIString / ProcessEventIdx
+- [ ] Fix ~GetPlainANSIString~ GetNameEntry on UE 4.18
 
 ## Credits
 

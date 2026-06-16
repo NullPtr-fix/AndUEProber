@@ -74,7 +74,7 @@ void main_thread()
 	// Remove once UI tap path is solved or after S5/S6 ships.
 	std::thread([]()
 	{
-		std::this_thread::sleep_for(std::chrono::seconds(4));
+		std::this_thread::sleep_for(std::chrono::seconds(5));
 		LOGI("[AutoDump] === BEGIN ===");
 		auto& prober = UEProber::GetInstance();
 		prober.RunAutoDumpFlow();

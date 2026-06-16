@@ -13,7 +13,7 @@
 #include <thread>
 #include <unistd.h>
 
-#include "UECore/CoreUObject_classes.hpp"
+#include "UECore/Basic.h"
 #include "Utils/ElfScanner/ElfScannerManager.h"
 #include "Utils/Logger.h"
 

@@ -3326,10 +3326,10 @@ void UEProber::Phase5_ProbeFContainerPropertyTails() {
     // matches `targetName`. Only walks reflection-bearing UClass / UScriptStruct
     // since those have ChildProperties chains (FField linked list).
     auto findAnchor = [&](const char* targetName) -> uintptr_t {
-        int32_t count = UObject::GObjects->Num();
+        int32_t count = BridgeGetObjectNum();
         int32_t scanned = 0, eligibleStructs = 0, walkedFields = 0;
         for (int32_t i = 1; i < count; ++i) {
-            uintptr_t obj = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(i));
+            uintptr_t obj = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(i));
             if (!IsValidPtr(obj)) continue;
             ++scanned;
             uintptr_t cls = 0;

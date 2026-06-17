@@ -147,7 +147,7 @@ __attribute__((constructor)) void ctor()
 {
 	LOGI("ctor");
 
-	CrashHandler::Install();
+	// CrashHandler::Install();
 
 	// Enable if not use AndKittyInjector
 	// if (!g_Initialized.exchange(true))

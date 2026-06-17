@@ -37,6 +37,25 @@ bool    KMgrIsValidPtr(uintptr_t address);
 // Only valid after DetectAndPrepareGame returns true.
 std::string ProfileGetNameByID(int32_t id);
 
+// In-memory FName layout for the matched profile (engine-version aware: UE5.1
+// reordered Number<->DisplayIndex, case-preserving adds DisplayIndex, outline
+// drops the inline Number). Sentinels: numberOffset < 0 => outline-number build
+// (no inline Number); displayOffset < 0 => not case-preserving.
+struct FNameLayout {
+    int32_t comparisonOffset = -1;
+    int32_t displayOffset = -1;
+    int32_t numberOffset = -1;
+    int32_t size = 0;
+};
+FNameLayout ProfileGetFNameLayout();
+
+// Offset-based GObjects iteration via the matched profile's UEVars (wired by
+// InitUEVars in DetectAndPrepareGame, like AndUEDumper). Returns raw object
+// pointers; the prober reads every field at probed offsets, so it needs no
+// typed object/FName layout of its own.
+void*   BridgeGetObjectByIndex(int32_t index);
+int32_t BridgeGetObjectNum();
+
 // Call the matched profile's findProcessEvent.
 // Returns true if found; writes absolute address and vtable index.
 bool ProfileFindProcessEvent(uint8_t* uObject, uintptr_t* pe_address_out, int* pe_index_out);

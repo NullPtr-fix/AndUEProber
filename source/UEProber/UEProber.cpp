@@ -13,7 +13,6 @@
 #include <thread>
 #include <unistd.h>
 
-#include "UECore/Basic.h"
 #include "Utils/ElfScanner/ElfScannerManager.h"
 #include "Utils/Logger.h"
 
@@ -36,8 +35,6 @@ static bool FNameEq(const std::string& a, const std::string& b) {
     }
     return true;
 }
-
-using namespace SDK;
 
 // ============================================================
 //  Safe Probe — sigsetjmp/siglongjmp 捕获 GetNameByID 内部的 SIGSEGV/SIGBUS
@@ -138,17 +135,31 @@ UEProber::UEProber() {
 // ============================================================
 
 bool UEProber::TryReadFName(uintptr_t address, std::string& outName) {
-    struct RawFName {
-        int32_t ComparisonIndex;
-        uint32_t Number;
-    };
-
-    RawFName fname{};
-    if (!KMgrRead(address, &fname, sizeof(fname)))
+    // FName layout is engine-version + build-flag dependent (UE5.1 reordered
+    // Number<->DisplayIndex; case-preserving adds DisplayIndex). Read each field
+    // at the matched profile's offset instead of assuming Number@+0x4 — on WW
+    // (case-preserving, Number@+0x8) a fixed {Comparison,Number@4} struct reads
+    // DisplayIndex as "Number" and the >0xFFFF guard rejects nearly every FName.
+    const FNameLayout layout = ProfileGetFNameLayout();
+    if (layout.comparisonOffset < 0)
+        return false;
+    const int readSize = (layout.size >= 4 && layout.size <= 16) ? layout.size : 12;
+    uint8_t fnameBuf[16] = {0};
+    if (!KMgrRead(address, fnameBuf, readSize))
         return false;
 
-    if (fname.ComparisonIndex < 0 || fname.ComparisonIndex > 0x2000000 || fname.Number > 0xFFFF)
+    int32_t comparisonIndex = 0;
+    memcpy(&comparisonIndex, fnameBuf + layout.comparisonOffset, sizeof(comparisonIndex));
+    if (comparisonIndex < 0 || comparisonIndex > 0x2000000)
         return false;
+
+    // Inline Number only exists on non-outline builds; use it as a sanity gate.
+    if (layout.numberOffset >= 0 && layout.numberOffset + 4 <= readSize) {
+        uint32_t number = 0;
+        memcpy(&number, fnameBuf + layout.numberOffset, sizeof(number));
+        if (number > 0xFFFF)
+            return false;
+    }
 
     // ProfileGetNameByID 内部可能做裸指针解引用,
     // 垃圾 ComparisonIndex 会导致 SIGSEGV. 用 sigsetjmp 保护.
@@ -165,7 +176,7 @@ bool UEProber::TryReadFName(uintptr_t address, std::string& outName) {
     }
 
     try {
-        std::string result = ProfileGetNameByID(fname.ComparisonIndex);
+        std::string result = ProfileGetNameByID(comparisonIndex);
         if (!result.empty() && result.size() < sizeof(resultBuf)) {
             resultLen = result.size();
             memcpy(resultBuf, result.c_str(), resultLen);
@@ -235,10 +246,10 @@ uintptr_t UEProber::FindObjectInGObjects(const std::string& targetName, const st
     if (namePrivateOffset < 0) return 0;
 
     bool filterByClass = !className.empty() && classPrivateOffset >= 0;
-    int32_t count = UObject::GObjects->Num();
+    int32_t count = BridgeGetObjectNum();
 
     for (int32_t i = 1; i < count; ++i) {
-        uintptr_t obj = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(i));
+        uintptr_t obj = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(i));
         if (!obj || !IsValidPtr(obj)) continue;
 
         if (filterByClass) {
@@ -263,7 +274,7 @@ int32_t UEProber::GetStructSize(const std::string& structName) {
     uintptr_t addr = 0;
     if (structName == "UObject") {
         addr = m_ClassObject;
-        if (!addr) addr = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(1));
+        if (!addr) addr = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(1));
     } else if (structName == "UStruct")   addr = m_ClassStruct;
     else if (structName == "UClass")      addr = m_ClassClass;
     else if (structName == "UField")      addr = m_ClassField;
@@ -385,7 +396,7 @@ void UEProber::Phase1_ProbeInternalIndex(uintptr_t objAddr, int32_t expectedInde
             int crossMatch = 0;
             for (int idx = 0; idx <= 3; ++idx) {
                 if (idx == expectedIndex) { crossMatch++; continue; }
-                uintptr_t otherObj = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(idx));
+                uintptr_t otherObj = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(idx));
                 if (!otherObj) continue;
                 uint32_t otherVal = 0;
                 if (KMgrRead(otherObj + off, &otherVal, 4) && (int32_t)otherVal == idx)
@@ -637,7 +648,7 @@ void UEProber::Phase1_ProbeObjectFlags(uintptr_t objAddr) {
         // 交叉验证多个对象: 其它对象的 Flags 也应非零且在合理范围内
         int validCount = 0;
         for (int idx = 0; idx <= 3; ++idx) {
-            uintptr_t otherObj = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(idx));
+            uintptr_t otherObj = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(idx));
             if (!otherObj) continue;
             uint32_t otherVal = 0;
             if (KMgrRead(otherObj + off, &otherVal, 4) && otherVal > 0 && otherVal <= 0x03FFFFFF)
@@ -699,8 +710,8 @@ void UEProber::Phase1_AutoProbe() {
 
     // GetByIndex(0) -> Package /Script/CoreUObject, Outer=nullptr, Flags=RF_Public(1)
     // GetByIndex(1) -> Class /Script/CoreUObject.Object, Class="Class", Outer=obj[0]
-    uintptr_t obj0 = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(0));
-    uintptr_t obj1 = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(1));
+    uintptr_t obj0 = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(0));
+    uintptr_t obj1 = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(1));
 
     if (!obj1 || !IsValidPtr(obj1)) {
         PDBG("Phase1_AutoProbe: 无法获取有效的 GetByIndex(1), 请检查 GObjects 地址");
@@ -739,7 +750,7 @@ void UEProber::Phase1_AutoProbe() {
         HasConfirmed("UObject::OuterPrivate")) {
         PDBG("--- GetFullName 验证 ---");
         for (int32_t idx = 0; idx < 5; ++idx) {
-            uintptr_t obj = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(idx));
+            uintptr_t obj = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(idx));
             if (!IsValidPtr(obj)) continue;
             std::string fullName;
             if (TryGetFullName(obj, fullName)) {
@@ -767,7 +778,7 @@ void UEProber::Phase2_ProbeSuperStruct(uintptr_t classAddr) {
 
     // classAddr 是 GetByIndex(0) 的 Class ("Package" UClass)
     // 其 Super 应指向 obj[1] (UObject 基类, Name="Object")
-    uintptr_t obj1 = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(1));
+    uintptr_t obj1 = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(1));
     PDBG("ProbeSuper: obj[1]=0x{:X}", obj1);
 
     // Super 是 UStruct 成员, 搜索范围: sizeof(UObject) ~ sizeof(UStruct)
@@ -1301,11 +1312,11 @@ void UEProber::Phase2_AutoProbe() {
     int32_t classPrivateOffset = GetConfirmedOffset("UObject::ClassPrivate");
     PDBG("namePrivateOffset=0x{:X}, classPrivateOffset=0x{:X}", namePrivateOffset, classPrivateOffset);
 
-    uintptr_t obj0 = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(0));
+    uintptr_t obj0 = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(0));
     PDBG("obj[0] = {}", obj0);
     if (!obj0) { PDBG("Phase2 中止: obj[0] 为空"); return; }
 
-    uintptr_t obj1 = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(1));
+    uintptr_t obj1 = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(1));
     PDBG("obj[1] = {}", obj1);
     if (!obj1) { PDBG("Phase2 中止: obj[1] 为空"); return; }
 
@@ -1418,7 +1429,7 @@ void UEProber::Phase3_ProbeCastFlags() {
     // 确保 m_ClassClass 已初始化
     if (!m_ClassClass) {
         // obj[1] (UObject 基类) -> Class = "Class" 元类
-        uintptr_t obj1 = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(1));
+        uintptr_t obj1 = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(1));
         if (!obj1) {
             PDBG("ProbeCastFlags: obj[1] 无效, 中止");
             PDBG("<<<<<<<<<< [ProbeCastFlags] END <<<<<<<<<<");
@@ -1445,7 +1456,7 @@ void UEProber::Phase3_ProbeCastFlags() {
     // 获取 "Package" UClass: obj[0] 的 Class
     uintptr_t packageClass = 0;
     {
-        uintptr_t obj0 = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(0));
+        uintptr_t obj0 = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(0));
         if (obj0 && IsValidPtr(obj0)) {
             KMgrRead(obj0 + classPrivateOffset, &packageClass, 8);
             if (!IsValidPtr(packageClass)) packageClass = 0;
@@ -1601,7 +1612,7 @@ void UEProber::Phase3_AutoProbe() {
     Phase3_ProbeCastFlags();
 
     // === DefaultObject ===
-    uintptr_t obj1 = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(1));
+    uintptr_t obj1 = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(1));
     PDBG("Phase3_AutoProbe: obj[1]=0x{:X}", obj1);
     if (obj1 && IsValidPtr(obj1)) {
         Phase3_ProbeClassDefaultObject(obj1);
@@ -2953,7 +2964,7 @@ void UEProber::Phase5_ProbeFPropertySize() {
 
     // 查找 "Vector" ScriptStruct 和 "Object" UClass 用于验证
     uintptr_t vectorStruct = FindObjectInGObjects("Vector", "ScriptStruct");
-    uintptr_t objectClass = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(1));
+    uintptr_t objectClass = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(1));
     PDBG("ProbePropSize: offsetInternalOff=0x{:X}, vectorStruct=0x{:X}, objectClass=0x{:X}",
          offsetInternalOff, vectorStruct, objectClass);
 
@@ -3139,11 +3150,11 @@ void UEProber::Phase5_ProbeFEnumPropertyLayout() {
 
     // ---------- Anchor: walk GObjects for any FEnumProperty instance ----------
     if (!m_FFEnumProp) {
-        int32_t count = UObject::GObjects->Num();
+        int32_t count = BridgeGetObjectNum();
         PDBG("ProbeFEnumPropertyLayout: 扫 GObjects 找 FEnumProperty 锚点 (Num={})", count);
         int32_t scanned = 0, eligibleStructs = 0, walkedFields = 0;
         for (int32_t i = 1; i < count && !m_FFEnumProp; ++i) {
-            uintptr_t obj = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(i));
+            uintptr_t obj = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(i));
             if (!IsValidPtr(obj)) continue;
             ++scanned;
             uintptr_t cls = 0;
@@ -3547,7 +3558,7 @@ void UEProber::Phase6_ScanProcessEvent() {
     m_Phase6ProcessEventCandidates.clear();
     PDBG("ScanProcessEvent: 开始探测 ProcessEvent VTable 索引 (via Profile::findProcessEvent)");
 
-    uintptr_t obj0 = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(0));
+    uintptr_t obj0 = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(0));
     PDBG("ScanProcessEvent: obj[0]=0x{:X}", obj0);
     if (!obj0 || !IsValidPtr(obj0)) {
         PDBG("ScanProcessEvent: obj[0] 无效, 中止");
@@ -3684,10 +3695,26 @@ void UEProber::CallGetEngineVersion() {
     using ProcessEventFn = void(*)(const void*, void*, void*);
     auto pe = reinterpret_cast<ProcessEventFn>(peFunc);
 
-    struct { FString ReturnValue; } parms = {};
-    pe(reinterpret_cast<const void*>(cdo), reinterpret_cast<void*>(func), &parms);
+    // GetEngineVersion writes an FString out-param (16B: {TCHAR* Data; int32 Num;
+    // int32 Max}). Read it offset-wise instead of via a typed FString; UE Android
+    // stores UTF-16, so narrow printable ASCII best-effort (diagnostic only).
+    uint8_t parms[0x10] = {};
+    pe(reinterpret_cast<const void*>(cdo), reinterpret_cast<void*>(func), parms);
 
-    std::string version = parms.ReturnValue.ToString();
+    std::string version;
+    uintptr_t dataPtr = 0;
+    int32_t count = 0;
+    memcpy(&dataPtr, parms, sizeof(dataPtr));
+    memcpy(&count, parms + sizeof(void*), sizeof(count));
+    if (dataPtr && count > 0 && count < 256) {
+        std::vector<uint16_t> wbuf(static_cast<size_t>(count));
+        if (KMgrRead(dataPtr, wbuf.data(), static_cast<size_t>(count) * sizeof(uint16_t))) {
+            for (uint16_t c : wbuf) {
+                if (!c) break;
+                if (c >= 0x20 && c < 0x7F) version += static_cast<char>(c);
+            }
+        }
+    }
     m_EngineVersion = version;
     PDBG("GetEngVer: EngineVersion = {}", version);
     PDBG("<<<<<<<<<< [CallGetEngineVersion] END <<<<<<<<<<");
@@ -3945,7 +3972,7 @@ void UEProber::DrawPhase1() {
 
         // 显示 obj[0]~obj[4]
         for (int i = 0; i <= 4; ++i) {
-            uintptr_t obj = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(i));
+            uintptr_t obj = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(i));
             if (obj && IsValidPtr(obj)) {
                 std::string fullName;
                 if (TryGetFullName(obj, fullName)) {
@@ -4003,10 +4030,10 @@ void UEProber::DrawPhase1() {
 
     // 内存 dump
     if (ImGui::TreeNode("内存查看")) {
-        uintptr_t obj0 = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(0));
+        uintptr_t obj0 = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(0));
         if (obj0 && IsValidPtr(obj0))
             DrawMemoryDump(obj0, 0x40, "obj[0]");
-        uintptr_t obj1 = reinterpret_cast<uintptr_t>(UObject::GObjects->GetByIndex(1));
+        uintptr_t obj1 = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(1));
         if (obj1 && IsValidPtr(obj1))
             DrawMemoryDump(obj1, 0x40, "obj[1]");
         ImGui::TreePop();
@@ -4742,6 +4769,7 @@ void UEProber::RunAutoDumpFlow() {
         m_DumpStatus.store(EDumpStatus::Failed);
         return;
     }
+
     PDBG("[AutoDump] Phase1~6 AutoProbe...");
     Phase1_AutoProbe();
     Phase2_AutoProbe();
@@ -4764,30 +4792,16 @@ void UEProber::DetectGame() {
 
     m_GameDetection = result;
     m_GameDetected = true;
-    SDK::FName::s_NameResolver = [](int32_t id) {
-        return ProfileGetNameByID(id);
-    };
+    // DetectAndPrepareGame -> InitUEVars already wired the dumper's offset-based
+    // object array + FName resolution (UEWrappers). The prober iterates objects
+    // via the bridge (BridgeGetObjectByIndex/Num) and reads names via
+    // TryReadFName, so there is no local TUObjectArray / FName layout to set up.
+    m_GObjectsInitialized = true;
 
     PDBG("检测到游戏: {} ({})", result.GameName, result.PackageName);
     PDBG("UE Base: 0x{:X}, GUObjectArray: 0x{:X}, ObjectsFieldAddr: 0x{:X}",
          result.UEBaseAddress, result.GUObjectArrayPtr, result.ObjectsFieldAddr);
-
-    // ---- 初始化 GObjects: 使用 profile 提供的地址, 在进程内读取 Objects 指针 ----
-    auto* objArray = new TUObjectArray();
-    if (KMgrRead(result.ObjectsFieldAddr, &objArray->Objects, sizeof(void*))) {
-        objArray->NumElementsPerChunk = result.NumElementsPerChunk;
-        objArray->MaxElements = 327680;
-        objArray->NumElements = 327680;
-        objArray->MaxChunks = 5;
-        objArray->NumChunks = 5;
-        UObject::GObjects.InitManually(objArray);
-    } else {
-        PDBG("读取 GObjects 地址失败, 无法初始化 GObjects");
-        return;
-    }
-    m_GObjectsInitialized = true;
-
-    PDBG("GObjects 初始化完成: NumElementsPerChunk={} ({})",
+    PDBG("GObjects ready (via UEVars): NumElementsPerChunk={} ({})",
          result.NumElementsPerChunk, result.NumElementsPerChunk > 0 ? "chunked" : "flat");
 }
 

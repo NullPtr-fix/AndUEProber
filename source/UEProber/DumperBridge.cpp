@@ -12,6 +12,7 @@
 #include "Dumper.hpp"
 #include "UE/UEMemory.hpp"
 #include "UE/UEOffsets.hpp"
+#include "UE/UEWrappers.hpp"
 
 #include "GameProfiles/IGameProfileEx.hpp"
 
@@ -216,6 +217,22 @@ bool DetectAndPrepareGame(GameDetectionResult& result)
     if (result.DecryptFNameAddr)
         LOGI("DecryptFName: %p", (void*)result.DecryptFNameAddr);
 
+    // Bring up the profile's UEVars (FNamePool / GNames) now so name resolution
+    // works during probing. The base IGameProfile::GetNameByID path reads
+    // _UEVars.NamesPtr, which is otherwise only initialized by UEDumper::Init at
+    // dump time — leaving probe-time lookups empty. That (not the FName layout)
+    // is why ProbeNamePrivate found no "Object" candidate on FNamePool profiles
+    // like WutheringWaves. Custom profiles (NiZhan/DeltaForce) override
+    // GetNameByID with a self-contained decrypt call, so they were unaffected.
+    {
+        UEVarsInitStatus st = g_ExProfile->AsGameProfile()->InitUEVars();
+        if (st == UEVarsInitStatus::SUCCESS)
+            LOGI("InitUEVars OK — probe-time name resolution ready.");
+        else
+            LOGE("InitUEVars failed (%s); probe-time names may be empty.",
+                 UEVars::InitStatusToStr(st).c_str());
+    }
+
     result.GameName = g_ExProfile->AsGameProfile()->GetAppName();
     result.PackageName = sGamePackage;
     result.Success = true;
@@ -233,6 +250,32 @@ std::string ProfileGetNameByID(int32_t id)
         return "";
 
     return g_ExProfile->PublicGetNameByID(id);
+}
+
+FNameLayout ProfileGetFNameLayout()
+{
+    FNameLayout l;
+    if (!g_ExProfile)
+        return l;
+
+    const UE_Offsets* off = g_ExProfile->AsGameProfile()->GetOffsets();
+    l.comparisonOffset = static_cast<int32_t>(off->FName.ComparisonIndex);
+    l.numberOffset  = off->Config.isUsingOutlineNumberName  ? -1 : static_cast<int32_t>(off->FName.Number);
+    l.displayOffset = off->Config.isUsingCasePreservingName ? static_cast<int32_t>(off->FName.DisplayIndex) : -1;
+    l.size = static_cast<int32_t>(off->FName.Size);
+    return l;
+}
+
+void* BridgeGetObjectByIndex(int32_t index)
+{
+    UE_UObjectArray* arr = UEWrappers::GetObjects();
+    return arr ? arr->GetObjectPtr(index) : nullptr;
+}
+
+int32_t BridgeGetObjectNum()
+{
+    UE_UObjectArray* arr = UEWrappers::GetObjects();
+    return arr ? arr->GetNumElements() : 0;
 }
 
 bool ProfileFindProcessEvent(uint8_t* uObject, uintptr_t* pe_address_out, int* pe_index_out)

@@ -44,6 +44,7 @@
 #include "UE/UEGameProfiles/LineageW.hpp"
 #include "UE/UEGameProfiles/RLSideswipe.hpp"
 #include "GameProfiles/PUBG.hpp"
+#include "GameProfiles/PUBGMHD.hpp"
 #include "GameProfiles/DeltaForce.hpp"
 #include "GameProfiles/NiZhan.hpp"
 #include "GameProfiles/RocoKingdom.hpp"
@@ -119,7 +120,9 @@ static std::vector<IGameProfileEx*>& GetExProfiles()
         new GameProfileEx<AuroriaProfile>(),
         new GameProfileEx<LineageWProfile>(),
         new GameProfileEx<RLSideswipeProfile>(),
+        // Ex
         new GameProfileEx<PUBGProfile>(),
+        new GameProfileEx<PUBGMHDProfile>(),
         new GameProfileEx<DeltaForceProfile>(),
         new GameProfileEx<NiZhanProfile>(),
         new GameProfileEx<RocoKingdomProfile>(),

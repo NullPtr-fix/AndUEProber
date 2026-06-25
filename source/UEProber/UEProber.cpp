@@ -266,6 +266,38 @@ uintptr_t UEProber::FindObjectInGObjects(const std::string& targetName, const st
     return 0;
 }
 
+void UEProber::DetectReflectionModel() {
+    if (m_ReflectionModel != EReflectionModel::Unknown) return;
+
+    int32_t nameOff  = GetConfirmedOffset("UObject::NamePrivate");
+    int32_t classOff = GetConfirmedOffset("UObject::ClassPrivate");
+    if (nameOff < 0 || classOff < 0) {
+        PDBG("DetectReflectionModel: Name/Class 未确认, 暂不判别 (保持 Unknown -> 默认 FField 行为)");
+        return;
+    }
+
+    bool foundInstance = false;
+    int32_t total = BridgeGetObjectNum();
+    for (int32_t i = 1; i < total; ++i) {
+        uintptr_t obj = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(i));
+        if (!obj || !IsValidPtr(obj)) continue;
+        uintptr_t cls = 0;
+        if (!KMgrRead(obj + classOff, &cls, 8) || !IsValidPtr(cls)) continue;
+        std::string clsName;
+        if (!TryReadFName(cls + nameOff, clsName) || !clsName.ends_with("Property")) continue;
+        std::string objName;
+        TryReadFName(obj + nameOff, objName);
+        if (objName.rfind("Default__", 0) == 0) continue;  // property UClass 的 CDO, 两模型都有
+        foundInstance = true;
+        PDBG("DetectReflectionModel: 命中属性实例 [{}] class=\"{}\" name=\"{}\"", i, clsName, objName);
+        break;
+    }
+    m_ReflectionModel = foundInstance ? EReflectionModel::UProperty : EReflectionModel::FField;
+    PDBG("DetectReflectionModel: {} 模型 (非CDO属性实例 {})",
+         foundInstance ? "UProperty(<=4.24)" : "FField(4.25+)",
+         foundInstance ? "存在" : "不存在");
+}
+
 int32_t UEProber::GetStructSize(const std::string& structName) {
     int32_t sizeOff = GetConfirmedOffset("UStruct::PropertiesSize");
     if (sizeOff < 0) return 0;
@@ -898,125 +930,114 @@ void UEProber::Phase2_ProbeSuperStruct(uintptr_t classAddr) {
     PDBG("<<<<<<<<<< [ProbeSuper] END <<<<<<<<<<");
 }
 
-void UEProber::Phase2_ProbeMinAlignment(uintptr_t execUbergraph, uintptr_t objectUClass) {
-    PDBG(">>>>>>>>>> [ProbeMinAlignment] BEGIN >>>>>>>>>>");
-    m_Phase2MinAlignCandidates.clear();
-    PDBG("ProbeMinAlignment: execUbergraph=0x{:X}, objectUClass=0x{:X}",
-         execUbergraph, objectUClass);
-
-    // MinAlignment 是 UStruct 成员, Size 此时尚未确认
-    // confidence >= 1.0 时 early break, 无需设定上界
-    int scannedCount = 0;
-    for (int32_t off = 0x28; ; off += 4) {
-        int32_t valExec = 0, valObject = 0;
-        bool r1 = KMgrRead(execUbergraph + off, &valExec, 4);
-        if (!r1) {
-            PDBG("ProbeMinAlignment: ReadMem 失败 off=0x{:X}, 停止扫描 (已扫描 {} 个偏移)", off, scannedCount);
-            break;
-        }
-        bool r2 = objectUClass && KMgrRead(objectUClass + off, &valObject, 4);
-        scannedCount++;
-
-        float confidence = 0.0f;
-        if (valExec == 0x1 && r2 && valObject == 0x8)
-            confidence = 1.0f;
-        else if ((valExec == 0x1 || valExec == 0x4 || valExec == 0x8) &&
-                 r2 && (valObject == 0x4 || valObject == 0x8 || valObject == 0x10))
-            confidence = 0.4f;
-
-        if (confidence > 0.05f) {
-            PDBG("ProbeMinAlignment: off=0x{:X} valExec=0x{:X} valObject=0x{:X} conf={:.2f}",
-                 off, valExec, valObject, confidence);
-            m_Phase2MinAlignCandidates.push_back({
-                off, (uint64_t)valExec,
-                std::format("偏移 0x{:X}: ExecUbergraph={}, Object={}", off, valExec, valObject),
-                confidence
-            });
-        }
-
-        if (confidence >= 1.0f) break;
+int32_t UEProber::Phase2_ProbeUObjectSize() {
+    PDBG(">>>>>>>>>> [ProbeUObjectSize] BEGIN >>>>>>>>>>");
+    int32_t namePrivateOffset = GetConfirmedOffset("UObject::NamePrivate");
+    int32_t classPrivateOffset = GetConfirmedOffset("UObject::ClassPrivate");
+    if (namePrivateOffset < 0 || classPrivateOffset < 0) {
+        PDBG("ProbeUObjectSize: 前置偏移不全, 中止");
+        PDBG("<<<<<<<<<< [ProbeUObjectSize] END <<<<<<<<<<");
+        return 0;
     }
 
-    PDBG("ProbeMinAlignment: 扫描完毕, 候选数={}, 扫描偏移数={}",
-         m_Phase2MinAlignCandidates.size(), scannedCount);
-
-    std::sort(m_Phase2MinAlignCandidates.begin(), m_Phase2MinAlignCandidates.end(),
-        [](const auto& a, const auto& b) { return a.confidence > b.confidence; });
-
-    if (!m_Phase2MinAlignCandidates.empty() && m_Phase2MinAlignCandidates[0].confidence >= 0.8f) {
-        auto& best = m_Phase2MinAlignCandidates[0];
-        auto& r = GetResult("UStruct::MinAlignment");
-        r.offset = best.offset; r.size = 4; r.typeName = "int32";
-        r.evidence = best.description; r.autoDetected = true;
-        if (best.confidence >= 1.0f) r.confirmed = true;
-        PDBG("ProbeMinAlignment: 选定 offset=0x{:X}, confidence={:.2f}, confirmed={}",
-             best.offset, best.confidence, r.confirmed);
-    } else {
-        PDBG("ProbeMinAlignment: 无满足阈值的候选 (最佳 confidence={:.2f})",
-             m_Phase2MinAlignCandidates.empty() ? 0.0f : m_Phase2MinAlignCandidates[0].confidence);
+    int32_t maxEnd = 0;
+    for (const char* k : {"UObject::ObjectFlags", "UObject::InternalIndex", "UObject::ClassPrivate",
+                          "UObject::NamePrivate", "UObject::OuterPrivate"}) {
+        int32_t o = GetConfirmedOffset(k);
+        if (o < 0) continue;
+        int32_t sz = GetResult(k).size;
+        int32_t end = o + (sz > 0 ? sz : 8);
+        if (end > maxEnd) maxEnd = end;
     }
-    PDBG("<<<<<<<<<< [ProbeMinAlignment] END <<<<<<<<<<");
+    if (maxEnd <= 0) maxEnd = 0x28;
+    int32_t lo = (maxEnd + 7) & ~7;
+    int32_t hi = maxEnd + 0x30;
+    PDBG("ProbeUObjectSize: Range [0x{:X}, 0x{:X}]", lo, hi);
+
+    uintptr_t kismet = FindObjectInGObjects("KismetSystemLibrary", "Class");
+    if (!kismet) {
+        PDBG("ProbeUObjectSize: KismetSystemLibrary 未找到, 中止");
+        PDBG("<<<<<<<<<< [ProbeUObjectSize] END <<<<<<<<<<");
+        return 0;
+    }
+
+    // 双层扫: offC = 类里指向 Children头 的指针偏移; offN = 该头里的 Next 偏移(== sizeof(UObject)).
+    // 取兄弟链最长者. 链校验用 "同 ClassPrivate"(同类 UFunction), 不解名字, 快.
+    int bestChain = 0; int32_t bestNext = 0, bestHead = 0;
+    for (int32_t offC = lo; offC <= hi; offC += 8) {
+        uintptr_t head = 0;
+        if (!KMgrRead(kismet + offC, &head, 8) || !IsValidPtr(head)) continue;
+        uintptr_t headClass = 0;
+        if (!KMgrRead(head + classPrivateOffset, &headClass, 8) || !IsValidPtr(headClass)) continue;
+
+        for (int32_t offN = lo; offN <= hi; offN += 8) {
+            int chain = 1;
+            uintptr_t cur = head;
+            for (int j = 0; j < 64; ++j) {
+                uintptr_t nn = 0;
+                if (!KMgrRead(cur + offN, &nn, 8) || !IsValidPtr(nn)) break;
+                uintptr_t nc = 0;
+                if (!KMgrRead(nn + classPrivateOffset, &nc, 8) || nc != headClass) break;
+                chain++; cur = nn;
+            }
+            if (chain > bestChain) { bestChain = chain; bestNext = offN; bestHead = offC; }
+        }
+    }
+
+    if (bestChain >= 4 && bestNext > 0) {
+        std::string headName;
+        uintptr_t headPtr = 0; KMgrRead(kismet + bestHead, &headPtr, 8);
+        TryReadFName(headPtr + namePrivateOffset, headName);
+        PDBG("ProbeUObjectSize: sizeof(UObject)=0x{:X} (UField::Next; ChildrenOff=0x{:X} head=\"{}\" 链长={})",
+             bestNext, bestHead, headName, bestChain);
+        PDBG("<<<<<<<<<< [ProbeUObjectSize] END <<<<<<<<<<");
+        return bestNext;
+    }
+    PDBG("ProbeUObjectSize: 无足够长的兄弟链 (最长={}), 中止", bestChain);
+    PDBG("<<<<<<<<<< [ProbeUObjectSize] END <<<<<<<<<<");
+    return 0;
 }
 
-void UEProber::Phase2_ProbePropertiesSize(uintptr_t execUbergraph, uintptr_t objectUClass) {
+void UEProber::Phase2_ProbePropertiesSize(uintptr_t objectUClass, int32_t sizeofUObject) {
     PDBG(">>>>>>>>>> [ProbePropertiesSize] BEGIN >>>>>>>>>>");
-    m_Phase2SizeCandidates.clear();
-    int32_t alignOffset = GetConfirmedOffset("UStruct::MinAlignment");
-    PDBG("ProbePropertiesSize: execUbergraph=0x{:X}, objectUClass=0x{:X}, alignOffset=0x{:X}",
-         execUbergraph, objectUClass, alignOffset);
-    if (alignOffset < 0) { PDBG("ProbePropertiesSize: alignOffset < 0, 中止"); PDBG("<<<<<<<<<< [ProbePropertiesSize] END <<<<<<<<<<"); return; }
+    PDBG("ProbePropertiesSize: objectUClass=0x{:X}, sizeof(UObject)=0x{:X}", objectUClass, sizeofUObject);
+    if (!objectUClass || sizeofUObject <= 0) {
+        PDBG("ProbePropertiesSize: 入参无效, 中止");
+        PDBG("<<<<<<<<<< [ProbePropertiesSize] END <<<<<<<<<<");
+        return;
+    }
 
-    int scannedCount = 0;
-    // Size 通常紧邻 MinAlignment (±32 字节)
-    for (int32_t off = alignOffset - 32; off <= alignOffset + 32; off += 4) {
-        if (off == alignOffset) continue;
-        if (off < 0) continue;
+    // PropertiesSize 在 "Object" UClass 上的值 == sizeof(UObject)(精确, 非启发式). 它是 UStruct
+    // 成员, 必在 [sizeof(UObject), +0x40) 内. 交叉验证: 同偏移在 "Struct" UClass 上应给出 > sizeof
+    // (UObject) 的合理结构体大小, 排除偶然等于 sizeof 的别的 int 字段.
+    uintptr_t structClass = m_ClassStruct ? m_ClassStruct : FindObjectInGObjects("Struct", "Class");
+    for (int32_t off = sizeofUObject; off <= sizeofUObject + 0x40; off += 4) {
+        int32_t v = 0;
+        if (!KMgrRead(objectUClass + off, &v, 4) || v != sizeofUObject) continue;
 
-        int32_t valExec = 0;
-        if (!KMgrRead(execUbergraph + off, &valExec, 4)) continue;
-        scannedCount++;
-        if (valExec != 0x4) continue;
-
-        // 交叉验证: "Object" UClass 在同一偏移应为合理的 UObject 大小
-        float confidence = 0.8f;
-        std::string desc = std::format("偏移 0x{:X}: ExecUbergraph=0x{:X}", off, valExec);
-
-        int32_t valObject = 0;
-        if (objectUClass && KMgrRead(objectUClass + off, &valObject, 4)) {
-            if (valObject > 0x20 && valObject < 0x200 && (valObject % 8 == 0)) {
-                confidence = 1.0f;
-                desc += std::format(", Object=0x{:X}(合理)", valObject);
-            } else {
-                confidence = 0.5f;
-                desc += std::format(", Object=0x{:X}(不合理)", valObject);
-            }
+        int32_t vStruct = 0;
+        bool xok = structClass && KMgrRead(structClass + off, &vStruct, 4) &&
+                   vStruct > sizeofUObject && vStruct < 0x400;
+        if (structClass && !xok) {
+            PDBG("ProbePropertiesSize: off=0x{:X} 值匹配但 Struct 交叉验证失败(struct=0x{:X}), 跳过", off, vStruct);
+            continue;
         }
 
-        PDBG("ProbePropertiesSize: off=0x{:X} valExec=0x{:X} valObject=0x{:X} conf={:.2f}",
-             off, valExec, valObject, confidence);
-        m_Phase2SizeCandidates.push_back({off, (uint64_t)valExec, desc, confidence});
-
-        if (confidence >= 1.0f) break;
-    }
-
-    PDBG("ProbePropertiesSize: 扫描完毕, 候选数={}, 扫描偏移数={}",
-         m_Phase2SizeCandidates.size(), scannedCount);
-
-    std::sort(m_Phase2SizeCandidates.begin(), m_Phase2SizeCandidates.end(),
-        [](const auto& a, const auto& b) { return a.confidence > b.confidence; });
-
-    if (!m_Phase2SizeCandidates.empty() && m_Phase2SizeCandidates[0].confidence >= 0.8f) {
-        auto& best = m_Phase2SizeCandidates[0];
         auto& r = GetResult("UStruct::PropertiesSize");
-        r.offset = best.offset; r.size = 4; r.typeName = "int32";
-        r.evidence = best.description; r.autoDetected = true;
-        if (best.confidence >= 1.0f) r.confirmed = true;
-        PDBG("ProbePropertiesSize: 选定 offset=0x{:X}, confidence={:.2f}, confirmed={}",
-             best.offset, best.confidence, r.confirmed);
-    } else {
-        PDBG("ProbePropertiesSize: 无满足阈值的候选 (最佳 confidence={:.2f})",
-             m_Phase2SizeCandidates.empty() ? 0.0f : m_Phase2SizeCandidates[0].confidence);
+        r.offset = off; r.size = 4; r.typeName = "int32"; r.autoDetected = true; r.confirmed = true;
+        r.evidence = std::format("偏移 0x{:X}: Object 值==sizeof(UObject)=0x{:X}, Struct 值=0x{:X}", off, sizeofUObject, vStruct);
+        PDBG("ProbePropertiesSize: 选定 offset=0x{:X} (Object=0x{:X}, Struct=0x{:X})", off, sizeofUObject, vStruct);
+
+        // MinAlignment 是 UStruct 里紧跟 PropertiesSize 的 int32, 全版本相邻, 直接派生.
+        auto& rm = GetResult("UStruct::MinAlignment");
+        rm.offset = off + 4; rm.size = 4; rm.typeName = "int32"; rm.autoDetected = true; rm.confirmed = true;
+        rm.evidence = std::format("派生: PropertiesSize(0x{:X})+4", off);
+        PDBG("ProbePropertiesSize: 派生 MinAlignment offset=0x{:X}", off + 4);
+        PDBG("<<<<<<<<<< [ProbePropertiesSize] END <<<<<<<<<<");
+        return;
     }
+    PDBG("ProbePropertiesSize: [0x{:X},0x{:X}) 内未找到值==sizeof(UObject) 的字段, 中止",
+         sizeofUObject, sizeofUObject + 0x40);
     PDBG("<<<<<<<<<< [ProbePropertiesSize] END <<<<<<<<<<");
 }
 
@@ -1312,6 +1333,9 @@ void UEProber::Phase2_AutoProbe() {
     int32_t classPrivateOffset = GetConfirmedOffset("UObject::ClassPrivate");
     PDBG("namePrivateOffset=0x{:X}, classPrivateOffset=0x{:X}", namePrivateOffset, classPrivateOffset);
 
+    // 判别反射模型 (UProperty<=4.24 vs FField4.25+)
+    DetectReflectionModel();
+
     uintptr_t obj0 = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(0));
     PDBG("obj[0] = {}", obj0);
     if (!obj0) { PDBG("Phase2 中止: obj[0] 为空"); return; }
@@ -1320,24 +1344,15 @@ void UEProber::Phase2_AutoProbe() {
     PDBG("obj[1] = {}", obj1);
     if (!obj1) { PDBG("Phase2 中止: obj[1] 为空"); return; }
 
-    // === MinAlignment & Size (最优先探测, 为所有后续探测提供精确 size 边界) ===
-    PDBG("---------- [Step 1/5] MinAlignment & Size ----------");
-    PDBG("正在 GObjects 中搜索 ExecuteUbergraph...");
-    uintptr_t execUbergraph = FindObjectInGObjects("ExecuteUbergraph");
-    if (!execUbergraph) {
-        PDBG("FindObjectInGObjects(ExecuteUbergraph) 返回 0, MinAlignment/Size 探测将跳过");
+    // === Step 1: sizeof(UObject) 经 UField::Next 结构性确立 → 据此精确探 PropertiesSize ===
+    PDBG("---------- [Step 1/5] sizeof(UObject) & PropertiesSize ----------");
+    int32_t sizeofViaNext = Phase2_ProbeUObjectSize();
+    if (sizeofViaNext > 0) {
+        Phase2_ProbePropertiesSize(obj1, sizeofViaNext);
+        PDBG("Size 探测结果: PropertiesSize confirmed={}, MinAlignment confirmed={}",
+             HasConfirmed("UStruct::PropertiesSize"), HasConfirmed("UStruct::MinAlignment"));
     } else {
-        PDBG("ExecuteUbergraph = {}, 开始探测 MinAlignment", execUbergraph);
-        Phase2_ProbeMinAlignment(execUbergraph, obj1);
-        bool minAlignOk = HasConfirmed("UStruct::MinAlignment");
-        PDBG("MinAlignment 探测结果: confirmed={}", minAlignOk);
-        if (minAlignOk) {
-            PDBG("开始探测 Size");
-            Phase2_ProbePropertiesSize(execUbergraph, obj1);
-            PDBG("Size 探测结果: confirmed={}", HasConfirmed("UStruct::PropertiesSize"));
-        } else {
-            PDBG("MinAlignment 未确认, 跳过 Size 探测");
-        }
+        PDBG("sizeof(UObject) via UField::Next 失败, Size 探测跳过");
     }
 
     // 读取 sizeof(UObject) — 用于后续探测的搜索范围
@@ -1379,9 +1394,11 @@ void UEProber::Phase2_AutoProbe() {
     Phase2_ProbeChildren(obj1);
     PDBG("Children 探测结果: confirmed={}", HasConfirmed("UStruct::Children"));
 
-    // === ChildProperties ===
+    // === ChildProperties (仅 FField 模型) ===
     PDBG("---------- [Step 4/5] ChildProperties ----------");
-    if (HasConfirmed("UStruct::Children")) {
+    if (m_ReflectionModel == EReflectionModel::UProperty) {
+        PDBG("UProperty(<=4.24) 模型: 无 ChildProperties, 跳过探测 (属性走 UStruct::Children)");
+    } else if (HasConfirmed("UStruct::Children")) {
         PDBG("开始探测 ChildProperties");
         Phase2_ProbeChildProperties(obj1);
         PDBG("ChildProperties 探测结果: confirmed={}", HasConfirmed("UStruct::ChildProperties"));
@@ -3430,6 +3447,13 @@ void UEProber::Phase5_AutoProbe() {
     if (!m_GameDetected) { PDBG("请先检测游戏后再进行探测操作"); return; }
     m_PhaseStatus[5] = EPhaseStatus::InProgress;
     PDBG("========== [Phase5_AutoProbe] BEGIN ==========");
+
+    if (m_ReflectionModel == EReflectionModel::UProperty) {
+        PDBG("Phase5: UProperty(<=4.24) 模型无 FField/FProperty, 跳过整个 FField 探测阶段");
+        m_PhaseStatus[5] = EPhaseStatus::Completed;
+        PDBG("========== [Phase5_AutoProbe] END ==========");
+        return;
+    }
 
     if (!HasConfirmed("UStruct::ChildProperties")) {
         PDBG("Phase5: UStruct::ChildProperties 未确认, 中止");

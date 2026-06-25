@@ -49,6 +49,11 @@ public:
     template<typename T>
     struct has_find_gpas<T, std::void_t<decltype(std::declval<const T&>().FindGetPlainANSIString())>> : std::true_type {};
 
+    template<typename T, typename = void>
+    struct has_find_fname_tostring : std::false_type {};
+    template<typename T>
+    struct has_find_fname_tostring<T, std::void_t<decltype(std::declval<const T&>().FindFNameToString())>> : std::true_type {};
+
     // IGameProfileEx
     uintptr_t PublicGetGUObjectArrayPtr() const override { return this->GetGUObjectArrayPtr(); }
     std::string PublicGetNameByID(int32_t id) const override { return this->GetNameByID(id); }
@@ -57,6 +62,10 @@ public:
             return this->FindDecryptFName();
         } else if constexpr (has_find_gpas<TProfile>::value) {
             return this->FindGetPlainANSIString();
+        } else if constexpr (has_find_fname_tostring<TProfile>::value) {
+            // ToString-only profiles (e.g. PUBG HD): report the FName::ToString entry
+            // as the name-decode address instead of N/A.
+            return this->FindFNameToString();
         }
         return 0;
     }

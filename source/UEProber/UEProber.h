@@ -97,9 +97,16 @@ private:
     // ======================== 阶段 2: UField / UStruct ========================
 
     void Phase2_AutoProbe();
+    // Discriminate the reflection model: ≤UE4.24 keeps properties as UObject-derived
+    // UProperty on UStruct::Children; UE4.25+ moved them to FField/FProperty on
+    // UStruct::ChildProperties. Detected via the presence of a non-CDO *Property
+    // *instance* in GObjects — only ≤4.24 makes property instances UObjects (4.25+
+    // keeps the property UClass + its CDO in both, so the class alone can't
+    // discriminate). Gates the Phase2 ChildProperties probe + Phase5.
+    void DetectReflectionModel();
     void Phase2_ProbeSuperStruct(uintptr_t classAddr);
-    void Phase2_ProbePropertiesSize(uintptr_t execUbergraph, uintptr_t objectUClass);
-    void Phase2_ProbeMinAlignment(uintptr_t execUbergraph, uintptr_t objectUClass);
+    int32_t Phase2_ProbeUObjectSize();  // sizeof(UObject) via UField::Next offset (bootstraps size)
+    void Phase2_ProbePropertiesSize(uintptr_t objectUClass, int32_t sizeofUObject);
     void Phase2_ProbeChildren(uintptr_t classAddr);
     void Phase2_ProbeChildProperties(uintptr_t classAddr);
     void Phase2_ProbeUFieldNext(uintptr_t functionAddr);
@@ -298,4 +305,10 @@ private:
     GameDetectionResult m_GameDetection;
     bool m_GameDetected = false;
     bool m_GObjectsInitialized = false;  // GObjects 已从 profile 初始化
+
+    // 反射模型: UProperty(≤4.24, 属性在 Children 链) vs FField(4.25+, 属性在
+    // ChildProperties 链). DetectReflectionModel() 自动判别并缓存; Unknown 时按
+    // FField 默认行为走 (与历史一致).
+    enum class EReflectionModel { Unknown, UProperty, FField };
+    EReflectionModel m_ReflectionModel = EReflectionModel::Unknown;
 };

@@ -200,6 +200,58 @@ public:
         return cached;
     }
 
+    // FName::ToString anchor: UTimelineTemplate::UpdateCachedNames() opens with
+    //   FString TimelineName = GetName();   // GetName() = GetFName().ToString()
+    // so the first BL of that function is FName::ToString — which on enc builds
+    // IS the decrypt (it inlines the entry copy + decrypt). The function is
+    // located by the Printf format literal "%s__Direction_%s" further down.
+    // Functional (not log-gated) → survives logging strip; UE4→UE6 stable.
+    uintptr_t FindFNameToString() const
+    {
+        static uintptr_t cached = 0;
+        if (cached) return cached;
+
+        // UTF-16LE "%s__Direction_%s"
+        static const char *kDirPat =
+            "25 00 73 00 5F 00 5F 00 44 00 69 00 72 00 65 00 63 00 74 00 69 00 6F 00 6E 00 5F 00 25 00 73 00";
+        uintptr_t strAddr = findIdaPattern(PATTERN_MAP_TYPE::ANY_R, kDirPat, 0);
+        if (!strAddr) { LOGE("[ToStringDecrypt] \"%%s__Direction_%%s\" not found"); return 0; }
+
+        uintptr_t xref = FindAdrpXrefToAddr(strAddr);
+        if (!xref) { LOGE("[ToStringDecrypt] no ADRP xref to str %p", (void *)strAddr); return 0; }
+
+        // walk up to the prologue: SUB SP, SP, #imm
+        uintptr_t funcStart = 0;
+        for (int i = 0; i < 0x200; i++)
+        {
+            uintptr_t p = xref - (uintptr_t)i * 4;
+            uint32_t insn = vm_rpm_ptr<uint32_t>((void *)p);
+            if ((insn & 0xFF8003FF) == 0xD10003FF) { funcStart = p; break; }  // SUB SP, SP, #imm
+        }
+        if (!funcStart) return 0;
+
+        // first BL after prologue = GetName() == FName::ToString (thunk ok — it tail-calls)
+        for (uintptr_t p = funcStart; p < funcStart + 0x100; p += 4)
+        {
+            uint32_t insn = vm_rpm_ptr<uint32_t>((void *)p);
+            if ((insn & 0xFC000000) == 0x94000000)  // BL
+            {
+                uintptr_t t = DecodeBL(p);
+                if (t && kPtrValidator.isPtrExecutable(t, sizeof(uint32_t)))
+                {
+                    cached = t;
+                    uintptr_t base = GetUnrealELF().base();
+                    LOGI("[ToStringDecrypt] FName::ToString @ %p (+0x%lX) str=+0x%lX func=+0x%lX",
+                         (void *)t, (unsigned long)(t - base),
+                         (unsigned long)(strAddr - base), (unsigned long)(funcStart - base));
+                    return t;
+                }
+            }
+        }
+        LOGE("[ToStringDecrypt] no BL in prologue window @ func=%p", (void *)funcStart);
+        return 0;
+    }
+
 protected:
     uint8_t *GetNameEntry(int32_t id) const override
     {
@@ -234,6 +286,49 @@ protected:
         }
 
         return name;
+    }
+
+    // Prefer calling FName::ToString directly (it decrypts in one shot). Falls
+    // back to the entry-read + in-place DecryptFName path when ToString isn't
+    // located. id is the FName ComparisonIndex (pool handle); Number = 0.
+    std::string GetNameByID(int32_t id) const override
+    {
+        if (id < 0) return "";
+
+        uintptr_t toString = FindFNameToString();
+        if (!toString)
+            return IGameProfile::GetNameByID(id);
+
+        // validate id → readable pool entry before calling into game code
+        uint8_t *entry = GetNameEntry(id);
+        if (!entry || !kPtrValidator.isPtrReadable(entry, sizeof(uint16_t)))
+            return "";
+
+        // FString FName::ToString() const → void(FName* this@X0, FString* sret@X8).
+        // FStr has a user-provided dtor → non-trivial → AAPCS64 returns via X8.
+        // TCHAR is UTF-16 (char16_t) on UE Android builds — NOT 4-byte wchar_t.
+        struct FNameKey { int32_t Comparison; int32_t Number; };
+        struct FStr
+        {
+            char16_t *Data; int32_t Num; int32_t Max;
+            ~FStr() {}
+        };
+        using ToStringFn = FStr (*)(const FNameKey *);
+
+        FNameKey key{ id, 0 };
+        FStr out = ((ToStringFn)toString)(&key);
+        if (!out.Data || out.Num <= 1) return "";
+
+        std::string result;
+        result.reserve(out.Num);
+        for (int32_t i = 0; i + 1 < out.Num && i < 1024; i++)  // Num counts the null terminator
+        {
+            char16_t wc = out.Data[i];
+            if (!wc) break;
+            result.push_back(static_cast<char>(wc));
+        }
+        // FString buffer intentionally leaked (one-shot dumper)
+        return result;
     }
 
 private:
@@ -294,6 +389,49 @@ private:
                 return target;
         }
 
+        return 0;
+    }
+
+    // Scan UE .text for the ADRP(+ADD) that materializes `target` (a data addr).
+    // Cheap raw-bit ADRP prefilter + page compare, then Arm64::DecodeADRL to
+    // confirm the full ADRP+ADD resolves exactly. Returns the ADRP insn addr.
+    uintptr_t FindAdrpXrefToAddr(uintptr_t target) const
+    {
+        if (!target) return 0;
+        const uintptr_t targetPage = target & ~uintptr_t(0xFFF);
+
+        ElfScanner ue = GetUnrealELF();
+        const size_t kChunkInsns = 0x40000;  // 1 MiB / read
+        std::vector<uint32_t> buf(kChunkInsns);
+
+        for (auto &seg : ue.segments())
+        {
+            if (!seg.readable || !seg.is_private) continue;
+            if (!isEmulator() && !seg.executable) continue;
+
+            for (uintptr_t base = seg.startAddress; base < seg.endAddress; base += kChunkInsns * 4)
+            {
+                size_t remain = (seg.endAddress - base) / 4;
+                size_t n = remain < kChunkInsns ? remain : kChunkInsns;
+                if (!vm_rpm_ptr((void *)base, buf.data(), n * sizeof(uint32_t)))
+                    continue;
+
+                for (size_t i = 0; i < n; i++)
+                {
+                    uint32_t insn = buf[i];
+                    if ((insn & 0x9F000000) != 0x90000000) continue;  // ADRP
+
+                    int64_t imm = (int64_t)((((insn >> 5) & 0x7FFFF) << 2) | ((insn >> 29) & 0x3));
+                    imm = (imm << 43) >> 43;  // sign-extend 21-bit
+                    imm <<= 12;
+
+                    uintptr_t pc = base + i * 4;
+                    if (((pc & ~uintptr_t(0xFFF)) + (uintptr_t)imm) != targetPage) continue;
+
+                    if (Arm64::DecodeADRL(pc) == target) return pc;
+                }
+            }
+        }
         return 0;
     }
 };

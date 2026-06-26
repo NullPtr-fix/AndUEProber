@@ -7,12 +7,14 @@
 | com.tencent.nrc | ✅ | ✅ | ✅ | ✅ |
 | com.tencent.mf.uam | ✅ | ✅ | ✅ | ✅ |
 | com.tencent.tmgp.codev | ✅ | ✅ | ✅ | ✅ |
+| com.tencent.ig | ✅ | ✅ | ✅ | ✅ |
+| com.tencent.tmgp.pubgmhd | ✅ | ✅ | ✅ | ❌️ |
 
 | 探测结果总览 | Dump 结果 |
 |:---:|:---:|
 | ![results](misc/p2.jpg) | ![dump](misc/p3.jpg) |
 
-探测原理: [ReverseUE.md](source/UEProber/UECore/ReverseUE.md)（文档部分内容可能未及时更新 / Some parts may be outdated）
+探测原理: [ReverseUE.md](source/UEProber/UECore/ReverseUE.md)（文档部分内容可能未及时更新）
 
 ---
 
@@ -51,8 +53,9 @@ cmake --build build
 
 ## Todo
 
-- [x] Auto-detect GUObjectArray / GetPlainANSIString / ProcessEventIdx
-- [ ] Fix FName::ToString on UE 4.18
+- [x] Auto-detect GUObjectArray / FName::ToString / ProcessEventIdx
+- [x] Fix FName::ToString on UE 4.18
+- [ ] 
 
 ## Credits
 

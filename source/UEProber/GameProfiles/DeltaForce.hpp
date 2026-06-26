@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstddef>
 #include <cstdint>
 #include <string>
 
@@ -84,20 +85,39 @@ public:
 
     uintptr_t GetNamesPtr() const override
     {
-        return FindNamePoolDataPtr();
+        return GetUnrealELF().base();
     }
 
     UE_Offsets *GetOffsets() const override
     {
+        struct FChunkedFixedUObjectArray // = ObjObjects (reordered)
+        {
+            struct FUObjectItem;    // 0x18 item, Object@0 (only ever pointed-to)
+            int32_t MaxChunks;      // 0x00  (=7)
+            int32_t NumElements;    // 0x04  objects in use
+            int32_t NumChunks;      // 0x08  (=2 live)
+            int32_t _pad;           // 0x0C
+            FUObjectItem** Objects; // 0x10  chunk table (separate alloc)
+            uint8_t _lock[0x10];    // 0x18  ObjObjectsCritical / PreAllocatedObjects (0)
+            int32_t MaxElements;    // 0x28 (abs 0x38)  458752 (= MaxChunks × PerChunk)
+        };
+        struct FUObjectArray
+        {
+            typedef FChunkedFixedUObjectArray TUObjectArray;
+            uint8_t _gc[0x10];         // 0x00  ObjFirst/LastGCIndex, MaxObjectsNotConsideredByGC, OpenForDisregardForGC
+            TUObjectArray ObjObjects;  // 0x10
+        };
+
         static UE_Offsets offsets = UE_DefaultOffsets::UE4_25_27(isUsingCasePreservingName());
         static bool once = false;
         if (!once)
         {
             once = true;
-            offsets.FNamePool.BlocksBit = 18;
-            offsets.FNamePool.BlocksOff -= sizeof(void *);
-            offsets.TUObjectArray.NumElements = sizeof(int32_t);
-            offsets.TUObjectArray.Objects = offsets.TUObjectArray.NumElements + (sizeof(int32_t) * 3);
+            offsets.FNamePool.BlocksBit = 18; // never use
+            offsets.FNamePool.BlocksOff -= sizeof(void *); // never use
+            offsets.FUObjectArray.ObjObjects = offsetof(FUObjectArray, ObjObjects);
+            offsets.TUObjectArray.Objects = offsetof(FChunkedFixedUObjectArray, Objects);
+            offsets.TUObjectArray.NumElements = offsetof(FChunkedFixedUObjectArray, NumElements);
         }
         return &offsets;
     }
@@ -112,100 +132,6 @@ public:
         return bl_address + (int64_t)imm26 * 4;
     }
 
-    uintptr_t FindGetPlainANSIString() const
-    {
-        std::vector<std::pair<std::string, int>> idaPatterns = {
-            {"? ? ? 94 ? ? ? 91 ? ? ? 94 ? 06 00 F9 ? 02 40 F9 ? ? ? ? E1 03 00 AA ? ? ? 91 08 85 40 F9", 0},
-            {"? ? ? 94 ? 03 00 AA ? ? ? ? ? ? ? ? ? ? ? 94 ? ? ? 91 ? ? ? 94 ? 06 00 F9", 0x10},
-            {"? 06 00 F9 ? 02 40 F9 ? ? ? ? E1 03 00 AA ? ? ? 91 08 85 40 F9 E0 03 ? AA", -0xC},
-            {"E1 03 00 AA ? ? ? 91 08 85 40 F9 E0 03 ? AA E3 03 15 AA 00 01 3F D6", -0x18},
-        };
-
-        PATTERN_MAP_TYPE map_type = isEmulator() ? PATTERN_MAP_TYPE::ANY_R : PATTERN_MAP_TYPE::ANY_X;
-
-        for (const auto &it : idaPatterns)
-        {
-            uintptr_t bl_addr = findIdaPattern(map_type, it.first, it.second);
-            uintptr_t target = DecodeBL(bl_addr);
-            if (target != 0 && kPtrValidator.isPtrExecutable(target, sizeof(uint32_t))) return target;
-        }
-
-        return 0;
-    }
-
-    uintptr_t FindNamePoolDataPtr() const
-    {
-        static uintptr_t cached = 0;
-        if (cached != 0) return cached;
-
-        PATTERN_MAP_TYPE map_type = isEmulator() ? PATTERN_MAP_TYPE::ANY_R : PATTERN_MAP_TYPE::ANY_X;
-        std::vector<std::pair<std::string, int>> idaPatterns = {
-            {"C8 ? ? D0 08 ? ? 91 ? ? ? 39 ? ? ? 36 C9 7E 52 D3 E0 E3 03 91 03 80 80 52 FB E3 03 91 08 0D 09 8B C9 46 7F D3 08 1D 40 F9", 0},
-            {"C9 7E 52 D3 E0 E3 03 91 03 80 80 52 FB E3 03 91 08 0D 09 8B C9 46 7F D3 08 1D 40 F9 01 01 09 8B 28 24 40 78 16 FD 46 D3 E2 03 16 AA", -0x10},
-            {"03 80 80 52 FB E3 03 91 08 0D 09 8B C9 46 7F D3 08 1D 40 F9 01 01 09 8B 28 24 40 78 16 FD 46 D3 E2 03 16 AA", -0x18},
-        };
-
-        for (const auto &it : idaPatterns)
-        {
-            uintptr_t candidate = Arm64::DecodeADRL(findIdaPattern(map_type, it.first, it.second));
-            if (IsValidNamePoolData(candidate))
-            {
-                cached = candidate;
-                return cached;
-            }
-        }
-
-        cached = FindNamePoolDataFromWrapper(FindGetPlainANSIString());
-        return cached;
-    }
-
-    uintptr_t FindDecryptFName() const
-    {
-        static uintptr_t cached = 0;
-        if (cached != 0) return cached;
-
-        // Anchors leverage the FName fetch call sequence:
-        //   LSR Xn, X8, #6        ; len = header >> 6              (? FD 46 D3)
-        //   MOV X2, Xn            ; arg3 = len                     (E2 03 ? AA)
-        //   BL  __memcpy_chk      ; copy raw entry to stack buf    (? ? ? ??)
-        //   ADD X0, SP, #0xF8     ; arg1 = buf                     (E0 E3 03 91)
-        //   MOV W1, Wn            ; arg2 = len                     (E1 03 ? 2A)
-        //   BL  DecryptFName      ; <-- decode this target         (? ? ? ??)
-        //   ADD X0, SP, #0xF8                                       (E0 E3 03 91)
-        //   STRB WZR, [Xn, Xm]    ; null-terminate                 (? ? ? 38)
-        PATTERN_MAP_TYPE map_type = isEmulator() ? PATTERN_MAP_TYPE::ANY_R : PATTERN_MAP_TYPE::ANY_X;
-        std::vector<std::pair<std::string, int>> idaPatterns = {
-            // P1: full LSR→memcpy→DecryptFName window (most distinctive, lowest false-positive risk)
-            {"? FD 46 D3 E2 03 ? AA ? ? ? ? E0 E3 03 91 E1 03 ? 2A ? ? ? ?", 0x14},
-            // P2: from MOV X2 onward, no LSR anchor
-            {"E2 03 ? AA ? ? ? ? E0 E3 03 91 E1 03 ? 2A ? ? ? ?", 0x10},
-            // P3: original 5-insn window around BL DecryptFName (BL ... ADD ... MOV ... BL ... ADD ... STRB)
-            {"? ? ? ? E0 E3 03 91 E1 03 ? 2A ? ? ? ? E0 E3 03 91 ? ? ? 38", 0xC},
-            // P4: same as P3 but with extra downstream context (STR X0,[Xn,#8] + MOV X1,X0)
-            {"E0 E3 03 91 E1 03 ? 2A ? ? ? ? E0 E3 03 91 ? ? ? 38 ? ? ? ? ? 06 00 F9 E1 03 00 AA", 0x8},
-        };
-
-        for (const auto &it : idaPatterns)
-        {
-            uintptr_t bl_addr = findIdaPattern(map_type, it.first, it.second);
-            uintptr_t target = DecodeBL(bl_addr);
-            if (target != 0 && kPtrValidator.isPtrExecutable(target, sizeof(uint32_t)))
-            {
-                cached = target;
-                return cached;
-            }
-        }
-
-        cached = FindDecryptFromWrapper(FindGetPlainANSIString());
-        return cached;
-    }
-
-    // FName::ToString anchor: UTimelineTemplate::UpdateCachedNames() opens with
-    //   FString TimelineName = GetName();   // GetName() = GetFName().ToString()
-    // so the first BL of that function is FName::ToString — which on enc builds
-    // IS the decrypt (it inlines the entry copy + decrypt). The function is
-    // located by the Printf format literal "%s__Direction_%s" further down.
-    // Functional (not log-gated) → survives logging strip; UE4→UE6 stable.
     uintptr_t FindFNameToString() const
     {
         static uintptr_t cached = 0;
@@ -253,148 +179,36 @@ public:
     }
 
 protected:
-    uint8_t *GetNameEntry(int32_t id) const override
-    {
-        if (id < 0) return nullptr;
-
-        uintptr_t namesPtr = GetNamesPtr();
-        if (!IsValidNamePoolData(namesPtr)) return nullptr;
-
-        UE_Offsets *offsets = GetOffsets();
-        uintptr_t blockBit = offsets->FNamePool.BlocksBit;
-        uintptr_t blocksOff = offsets->FNamePool.BlocksOff;
-        uintptr_t chunkMask = (uintptr_t(1) << blockBit) - 1;
-        uintptr_t blockOffset = (static_cast<uintptr_t>(id) >> blockBit) * sizeof(void *);
-        uintptr_t chunkOffset = (static_cast<uintptr_t>(id) & chunkMask) * offsets->FNamePool.Stride;
-
-        uint8_t *chunk = vm_rpm_ptr<uint8_t *>((void *)(namesPtr + blocksOff + blockOffset));
-        if (!kPtrValidator.isPtrReadable(chunk, sizeof(uint16_t))) return nullptr;
-
-        return chunk + chunkOffset;
-    }
-
-    std::string GetNameEntryString(uint8_t *entry) const override
-    {
-        std::string name = IGameProfile::GetNameEntryString(entry);
-        if (name.empty()) return "";
-
-        uintptr_t decrypt = FindDecryptFName();
-        if (decrypt != 0)
-        {
-            using DecryptFName_t = void (*)(char *, uint32_t);
-            ((DecryptFName_t)decrypt)(name.data(), static_cast<uint32_t>(name.length()));
-        }
-
-        return name;
-    }
-
-    // Prefer calling FName::ToString directly (it decrypts in one shot). Falls
-    // back to the entry-read + in-place DecryptFName path when ToString isn't
-    // located. id is the FName ComparisonIndex (pool handle); Number = 0.
     std::string GetNameByID(int32_t id) const override
     {
         if (id < 0) return "";
 
-        uintptr_t toString = FindFNameToString();
-        if (!toString)
-            return IGameProfile::GetNameByID(id);
-
-        // validate id → readable pool entry before calling into game code
-        uint8_t *entry = GetNameEntry(id);
-        if (!entry || !kPtrValidator.isPtrReadable(entry, sizeof(uint16_t)))
-            return "";
-
-        // FString FName::ToString() const → void(FName* this@X0, FString* sret@X8).
-        // FStr has a user-provided dtor → non-trivial → AAPCS64 returns via X8.
-        // TCHAR is UTF-16 (char16_t) on UE Android builds — NOT 4-byte wchar_t.
-        struct FNameKey { int32_t Comparison; int32_t Number; };
-        struct FStr
+        // Primary: FName::ToString — PUBG family passes the FName BY VALUE in X0
+        // (the getter copies it to a stack slot internally), unlike DFM/Valorant
+        // which stage &FName and pass a pointer. FString returned via X8 sret.
+        if (uintptr_t toString = FindFNameToString())
         {
-            char16_t *Data; int32_t Num; int32_t Max;
-            ~FStr() {}
-        };
-        using ToStringFn = FStr (*)(const FNameKey *);
-
-        FNameKey key{ id, 0 };
-        FStr out = ((ToStringFn)toString)(&key);
-        if (!out.Data || out.Num <= 1) return "";
-
-        std::string result;
-        result.reserve(out.Num);
-        for (int32_t i = 0; i + 1 < out.Num && i < 1024; i++)  // Num counts the null terminator
-        {
-            char16_t wc = out.Data[i];
-            if (!wc) break;
-            result.push_back(static_cast<char>(wc));
+            struct FStr { char16_t *Data; int32_t Num; int32_t Max; ~FStr() {} };
+            using ToStringFn = FStr (*)(uint64_t);  // X0 = FName value {Comparison=id, Number=0}
+            FStr out = ((ToStringFn)toString)((uint64_t)(uint32_t)id);
+            if (out.Data && out.Num > 1)
+            {
+                std::string result;
+                result.reserve(out.Num);
+                for (int32_t i = 0; i + 1 < out.Num && i < 1024; i++)
+                {
+                    char16_t wc = out.Data[i];
+                    if (!wc) break;
+                    result.push_back(static_cast<char>(wc));
+                }
+                return result;
+            }
         }
-        // FString buffer intentionally leaked (one-shot dumper)
-        return result;
+
+        return IGameProfile::GetNameByID(id);
     }
 
 private:
-    static bool IsAddX0Sp(uint32_t insn)
-    {
-        return (insn & 0xFF0003FF) == 0x910003E0;
-    }
-
-    static bool IsMovW1FromReg(uint32_t insn)
-    {
-        return (insn & 0xFFE0FFFF) == 0x2A0003E1;
-    }
-
-    bool IsValidNamePoolData(uintptr_t candidate) const
-    {
-        if (!kPtrValidator.isPtrReadable(candidate, sizeof(uintptr_t))) return false;
-
-        uintptr_t blocksPtrAddr = candidate + GetOffsets()->FNamePool.BlocksOff;
-        if (!kPtrValidator.isPtrReadable(blocksPtrAddr, sizeof(uintptr_t))) return false;
-
-        uint8_t *chunk = vm_rpm_ptr<uint8_t *>((void *)blocksPtrAddr);
-        return kPtrValidator.isPtrReadable(chunk, sizeof(uint16_t));
-    }
-
-    uintptr_t FindNamePoolDataFromWrapper(uintptr_t wrapper) const
-    {
-        if (!kPtrValidator.isPtrExecutable(wrapper, sizeof(uint32_t))) return 0;
-
-        for (uintptr_t cursor = wrapper; cursor < wrapper + 0x180; cursor += sizeof(uint32_t))
-        {
-            uintptr_t candidate = Arm64::DecodeADRL(cursor);
-            if (IsValidNamePoolData(candidate)) return candidate;
-        }
-
-        return 0;
-    }
-
-    uintptr_t FindDecryptFromWrapper(uintptr_t wrapper) const
-    {
-        if (!kPtrValidator.isPtrExecutable(wrapper, sizeof(uint32_t))) return 0;
-
-        for (uintptr_t cursor = wrapper; cursor < wrapper + 0x180; cursor += sizeof(uint32_t))
-        {
-            uint32_t insn0 = vm_rpm_ptr<uint32_t>((void *)(cursor));
-            uint32_t insn1 = vm_rpm_ptr<uint32_t>((void *)(cursor + 0x4));
-            uint32_t insn2 = vm_rpm_ptr<uint32_t>((void *)(cursor + 0x8));
-            uint32_t insn3 = vm_rpm_ptr<uint32_t>((void *)(cursor + 0xC));
-            uint32_t insn4 = vm_rpm_ptr<uint32_t>((void *)(cursor + 0x10));
-
-            if ((insn0 & 0xFC000000) != 0x94000000) continue;
-            if (!IsAddX0Sp(insn1)) continue;
-            if (!IsMovW1FromReg(insn2)) continue;
-            if ((insn3 & 0xFC000000) != 0x94000000) continue;
-            if (!IsAddX0Sp(insn4)) continue;
-
-            uintptr_t target = DecodeBL(cursor + 0xC);
-            if (target != 0 && kPtrValidator.isPtrExecutable(target, sizeof(uint32_t)))
-                return target;
-        }
-
-        return 0;
-    }
-
-    // Scan UE .text for the ADRP(+ADD) that materializes `target` (a data addr).
-    // Cheap raw-bit ADRP prefilter + page compare, then Arm64::DecodeADRL to
-    // confirm the full ADRP+ADD resolves exactly. Returns the ADRP insn addr.
     uintptr_t FindAdrpXrefToAddr(uintptr_t target) const
     {
         if (!target) return 0;

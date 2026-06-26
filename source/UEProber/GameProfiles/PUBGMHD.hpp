@@ -1,12 +1,11 @@
 #pragma once
 
+#include <cstddef>
+#include <cstdint>
+
 #include "UE/UEGameProfile.hpp"
 using namespace UEMemory;
 
-// PUBG Mobile HD (com.tencent.tmgp.pubgmhd). Object side is the standard chunked
-// GUObjectArray reached via GOT — same finder/offsets as Valorant(codev). Name side
-// uses the "%s__Direction_%s" ToString anchor, but PUBG family passes the FName BY
-// VALUE in X0 (unlike DFM/Valorant which pass &FName).
 class PUBGMHDProfile : public IGameProfile
 {
 public:
@@ -45,55 +44,7 @@ public:
 
     uintptr_t GetGUObjectArrayPtr() const override
     {
-        PATTERN_MAP_TYPE map_type = isEmulator() ? PATTERN_MAP_TYPE::ANY_R : PATTERN_MAP_TYPE::ANY_X;
-
-        // Direct ADRP+ADD patterns (work for builds that reference GUObjectArray inline).
-        std::vector<std::pair<std::string, int>> idaPatterns = {
-            {"? 00 A0 52 ? 00 A0 52 ? ? ? 1A ? ? ? 1B ? ? ? ? ? ? ? 91", 0x10},
-            {"68 22 40 39 ? ? ? 34 ? ? ? ? ? ? ? 91 E1 03 13 AA 7F 22 00 39", 0x8},
-            {"91 E1 03 ? AA E0 03 08 AA E2 03 1F 2A", -7},
-            {"B4 21 0C 40 B9 ? ? ? ? ? ? ? 91", 5},
-            {"9F E5 00 ? 00 E3 FF ? 40 E3 ? ? A0 E1", -2},
-            {"96 df 02 17 ? ? ? ? 54 ? ? ? ? ? ? ? 91 e1 03 13 aa", 9},
-            {"f4 03 01 2a ? 00 00 34 ? ? ? ? ? ? ? ? ? ? 00 54 ? 00 00 14 ? ? ? ? ? ? ? 91", 0x18},
-            {"69 3e 40 b9 1f 01 09 6b ? ? ? 54 e1 03 13 aa ? ? ? ? f4 4f ? a9 ? ? ? ? ? ? ? 91", 0x18},
-        };
-
-        for (const auto &it : idaPatterns)
-        {
-            uintptr_t adrl = Arm64::DecodeADRL(findIdaPattern(map_type, it.first, it.second));
-            if (adrl != 0) return adrl;
-        }
-
-        // Fallback: this build references GUObjectArray via the GOT, so all the
-        // ADRP+ADD patterns above (which end in `... 91`) miss. The Slua bindings
-        // expose three tiny GUObjectArray.NumElements accessors (registered in Lua
-        // as GetObjectArrayInfo / GetObjectArrayMax / GetObjectArrayNum) that all
-        // compile to the same 4-instruction body:
-        //
-        //     ADRP X8, GOT_PAGE
-        //     LDR  X8, [X8, #GOT_OFF]   ; X8 = *(GOT slot) = &GUObjectArray
-        //     LDR  W0, [X8, #0x24]      ; FUObjectArray.ObjObjects.NumElements
-        //     RET
-        //
-        // Anchor on the LDR(GOT) + LDR(#0x24) + RET tail, step back to the ADRP,
-        // decode ADRP+LDR to get the GOT slot address, then dereference it once
-        // to obtain the actual GUObjectArray runtime address.
-        // `08 ? ? F9` = LDR X8, [X8, #imm12] (Rn=Rt=X8, 64-bit, any GOT offset).
-        // Each `?` is one wildcard byte — KittyScanner's IDA parser does not treat
-        // `??` as a single byte, it expands to two wildcard bytes.
-        {
-            std::string ida_pattern = "08 ? ? F9 00 25 40 B9 C0 03 5F D6";
-            const int step = -4;
-            uintptr_t got_slot = Arm64::DecodeADRL(findIdaPattern(map_type, ida_pattern, step), 4);
-            if (got_slot != 0)
-            {
-                uintptr_t arr = vm_rpm_ptr<uintptr_t>((void *)got_slot);
-                if (arr != 0) return arr;
-            }
-        }
-
-        return 0;
+        return FindGUObjectArrayViaFinishDestroy();
     }
 
     uintptr_t GetNamesPtr() const override
@@ -103,33 +54,132 @@ public:
 
     UE_Offsets *GetOffsets() const override
     {
-        // UE 4.18 — old UProperty reflection model: properties are UObject-derived
-        // UProperty on UStruct::Children (no FField/ChildProperties). The UE4_18_19
-        // table supplies the right UProperty.* offsets (ArrayDim@0x30 ElementSize@0x34
-        // PropertyFlags@0x38 Offset_Internal@0x44 sizeof@0x70) and leaves
-        // ChildProperties=0, so the dumper's unified walk skips the FField chain and
-        // reads members off Children. The Prober auto-detects the model (a non-CDO
-        // *Property *instance* in GObjects ⇒ old UProperty model) and skips the FField
-        // Phase5 for this profile.
+        struct FFixedUObjectArray   // = ObjObjects (single inline chunk, flat-read)
+        {
+            struct FUObjectItem;    // 0x18 item, Object@0 (only ever pointed-to)
+            int32_t NumElements;    // 0x00 (abs 0xB8)  objects in use (use this, not +0x04 = Num-1)
+            int32_t _lastIndex;     // 0x04 (abs 0xBC)  == NumElements-1
+            int32_t MaxElements;    // 0x08 (abs 0xC0)  single-chunk capacity (~400000)
+            int32_t _pad;           // 0x0C (abs 0xC4)
+            FUObjectItem* Objects;  // 0x10 (abs 0xC8)  inline chunk[0] -> FUObjectItem[] (stride 0x18, Object@0)
+        };
+        struct FUObjectArray
+        {
+            typedef FFixedUObjectArray TUObjectArray;
+            uint8_t _front[0xB8];     // 0x00  reordered: GC indices + listener TArrays + locks
+            TUObjectArray ObjObjects; // 0xB8
+        };
+
         static UE_Offsets offsets = UE_DefaultOffsets::UE4_18_19(isUsingCasePreservingName());
         static bool once = false;
         if (!once)
         {
             once = true;
-            // Names resolve via FName::ToString (GetNameByID override); the FNamePool
-            // config is never consulted, but flag it so the emitted offset dump matches
-            // the IsUsingFNamePool() virtual.
-            offsets.Config.IsUsingFNamePool = true;
-            // Customized FLAT FFixedUObjectArray (runtime-verified): a contiguous
-            // FUObjectItem array (stride 0x18, Object@0) at GObjects+0xC8, with
-            // NumElements@+0xB8 and MaxElements@+0xC0 (~400000 preallocated).
-            // NOT chunked — *(+0xC8) points straight at FUObjectItems, not chunk ptrs.
-            offsets.FUObjectArray.ObjObjects = 0;
-            offsets.TUObjectArray.Objects = 0xC8;
-            offsets.TUObjectArray.NumElements = 0xB8;
-            offsets.TUObjectArray.NumElementsPerChunk = 0;  // flat
+            offsets.Config.IsUsingFNamePool = true; // never use
+            offsets.FUObjectArray.ObjObjects = offsetof(FUObjectArray, ObjObjects);
+            offsets.TUObjectArray.Objects = offsetof(FFixedUObjectArray, Objects);
+            offsets.TUObjectArray.NumElements = offsetof(FFixedUObjectArray, NumElements);
+            offsets.TUObjectArray.NumElementsPerChunk = 0;  // flat read of the single inline chunk
         }
         return &offsets;
+    }
+
+    uintptr_t FindGUObjectArrayViaFinishDestroy() const
+    {
+        static uintptr_t cached = 0;
+        static bool tried = false;
+        if (tried) return cached;
+        tried = true;
+
+        // "Game engine shut down" UTF-16LE
+        static const char *kPat =
+            "47 00 61 00 6D 00 65 00 20 00 65 00 6E 00 67 00 69 00 6E 00 65 00 "
+            "20 00 73 00 68 00 75 00 74 00 20 00 64 00 6F 00 77 00 6E 00";
+        uintptr_t strAddr = findIdaPattern(PATTERN_MAP_TYPE::ANY_R, kPat, 0);
+        if (!strAddr) { LOGE("[FDGObj] \"Game engine shut down\" not found"); return 0; }
+
+        uintptr_t xref = FindAdrpXrefToAddr(strAddr);
+        if (!xref) { LOGE("[FDGObj] no ADRP xref to str %p", (void *)strAddr); return 0; }
+
+        // Scan UP to the UGameEngine::FinishDestroy prologue: STP X29,X30,[SP,#imm]
+        // (any addressing mode — pre-index/signed-offset). A frameless log helper
+        // (WuWa) has no such STP, so the up-scan crosses it onto FinishDestroy.
+        uintptr_t funcStart = 0;
+        for (int i = 0; i < 0x100; i++)
+        {
+            uintptr_t p = xref - (uintptr_t)i * 4;
+            uint32_t insn = vm_rpm_ptr<uint32_t>((void *)p);
+            if ((insn & 0xFC407FFF) == 0xA8007BFD) { funcStart = p; break; }  // STP X29,X30,[SP,..]
+        }
+        if (!funcStart) { LOGE("[FDGObj] no STP prologue above xref %p", (void *)xref); return 0; }
+
+        // Scan DOWN to the Super::FinishDestroy call. UE4.25+ tail-calls it via a
+        // far B (terminal). UE4.18 (pubgmhd) calls via BL then epilogue+RET, so the
+        // call is the last BL before RET. Local CDO-skip/merge jumps (near B) ignored.
+        auto decodeBr = [](uintptr_t pc, uint32_t insn) -> uintptr_t {
+            int32_t imm26 = insn & 0x03FFFFFF;
+            if (imm26 & 0x02000000) imm26 |= (int32_t)0xFC000000;
+            return pc + (int64_t)imm26 * 4;
+        };
+        uintptr_t target = 0;
+        for (uintptr_t p = funcStart; p < funcStart + 0x200; p += 4)
+        {
+            uint32_t insn = vm_rpm_ptr<uint32_t>((void *)p);
+            if (insn == 0xD65F03C0) break;  // RET: end of a BL-style (non-tail-call) function
+            if ((insn & 0xFC000000) == 0x14000000)  // B
+            {
+                uintptr_t t = decodeBr(p, insn);
+                if (t < funcStart || t > funcStart + 0x400) { target = t; break; }  // far = tail-call (terminal)
+            }
+            else if ((insn & 0xFC000000) == 0x94000000)  // BL — Super is the last one before RET
+            {
+                target = decodeBr(p, insn);
+            }
+        }
+        if (!target) { LOGE("[FDGObj] no Super call in func %p", (void *)funcStart); return 0; }
+
+        // Guard: only scan executable code for the GUObjectArray load. A mis-identified
+        // Super call into data (UE4.18 shutdown path differs from 4.25+) bails cleanly
+        // to the existing fallback instead of decoding garbage from a data island.
+        if (!kPtrValidator.isPtrExecutable(target, sizeof(uint32_t)))
+        {
+            LOGE("[FDGObj] Super-call target %p not executable, bail", (void *)target);
+            return 0;
+        }
+
+        // In UEngine::FinishDestroy: first ADRP + its paired LDR Xd,[Xd,#imm12].
+        // ADRP and LDR may be separated by other insns (scheduling), so search the
+        // LDR by matching base register within a small window. Slot holds &GUObjectArray.
+        for (uintptr_t p = target; p < target + 0x80; p += 4)
+        {
+            uint32_t a = vm_rpm_ptr<uint32_t>((void *)p);
+            if ((a & 0x9F000000) != 0x90000000) continue;  // ADRP
+            uint32_t rd = a & 0x1F;
+            int64_t imm = (int64_t)((((a >> 5) & 0x7FFFF) << 2) | ((a >> 29) & 0x3));
+            imm = (imm << 43) >> 43;
+            imm <<= 12;
+            uintptr_t page = (p & ~uintptr_t(0xFFF)) + (uintptr_t)imm;
+            for (uintptr_t q = p + 4; q < p + 0x20; q += 4)
+            {
+                uint32_t l = vm_rpm_ptr<uint32_t>((void *)q);
+                if ((l & 0xFFC00000) == 0xF9400000 && ((l >> 5) & 0x1F) == rd)  // LDR Xt,[Xd,#imm12]
+                {
+                    uintptr_t slot = page + (uintptr_t)((l >> 10) & 0xFFF) * 8;
+                    uintptr_t arr = vm_rpm_ptr<uintptr_t>((void *)slot);
+                    if (arr && kPtrValidator.isPtrReadable(arr))
+                    {
+                        uintptr_t base = GetUnrealELF().base();
+                        LOGI("[FDGObj] GUObjectArray=%p (str=+0x%lX func=+0x%lX target=+0x%lX slot=+0x%lX)",
+                             (void *)arr, (unsigned long)(strAddr - base), (unsigned long)(funcStart - base),
+                             (unsigned long)(target - base), (unsigned long)(slot - base));
+                        cached = arr;
+                        return arr;
+                    }
+                }
+            }
+        }
+        LOGE("[FDGObj] no ADRP+LDR global load in target %p", (void *)target);
+        return 0;
     }
 
     // Decode ARM64 BL instruction at given address, return absolute target
@@ -145,9 +195,6 @@ public:
         return bl_address + (int64_t)imm26 * 4;
     }
 
-    // FName::ToString anchor via UTimelineTemplate::UpdateCachedNames() — see
-    // DeltaForce.hpp. First BL of that function (located by the Printf literal
-    // "%s__Direction_%s") is GetName()==FName::ToString.
     uintptr_t FindFNameToString() const
     {
         static uintptr_t cached = 0;
@@ -256,7 +303,6 @@ public:
             }
         }
 
-        // Fallback: standard FNameEntry read
         return IGameProfile::GetNameByID(id);
     }
 };

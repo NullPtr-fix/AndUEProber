@@ -163,6 +163,7 @@ private:
 
     void Phase6_AutoProbe();
     void Phase6_ScanProcessEvent();
+    void Phase6_ProbeUEnumNames();  // locate UEnum::Names TArray (layout varies per game)
 
     // ======================== 绘制 ========================
 

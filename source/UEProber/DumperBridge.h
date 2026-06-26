@@ -69,6 +69,8 @@ struct ProbedOffsets {
     uintptr_t objFlags = 0, objIndex = 0, objClass = 0, objName = 0, objOuter = 0;
     // UField
     uintptr_t fieldNext = 0;
+    // UEnum
+    uintptr_t uenumNames = 0;
     // UStruct
     uintptr_t structSuper = 0, structChildren = 0, structChildProps = 0, structSize = 0;
     // UClass

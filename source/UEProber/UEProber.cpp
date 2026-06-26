@@ -3622,12 +3622,99 @@ void UEProber::Phase6_AutoProbe() {
     m_PhaseStatus[6] = EPhaseStatus::InProgress;
     PDBG("===== 阶段 6: ProcessEvent VTable 索引 =====");
 
-    PDBG("---------- [Step 1/1] ScanProcessEvent ----------");
+    PDBG("---------- [Step 1/2] ScanProcessEvent ----------");
     Phase6_ScanProcessEvent();
     PDBG("ProcessEvent 探测结果: confirmed={}", HasConfirmed("ProcessEvent::VTableIdx"));
 
+    PDBG("---------- [Step 2/2] ProbeUEnumNames ----------");
+    Phase6_ProbeUEnumNames();
+    PDBG("UEnum::Names 探测结果: confirmed={}", HasConfirmed("UEnum::Names"));
+
     PDBG("阶段 6 自动探测完成");
     PDBG("<<<<<<<<<< [Phase6_AutoProbe] END <<<<<<<<<<");
+}
+
+void UEProber::Phase6_ProbeUEnumNames() {
+    PDBG(">>>>>>>>>> [ProbeUEnumNames] BEGIN >>>>>>>>>>");
+
+    int32_t classOff = GetConfirmedOffset("UObject::ClassPrivate");
+    if (classOff < 0) {
+        PDBG("ProbeUEnumNames: 缺 UObject::ClassPrivate, 中止");
+        PDBG("<<<<<<<<<< [ProbeUEnumNames] END <<<<<<<<<<");
+        return;
+    }
+
+    uintptr_t enumMeta = FindObjectInGObjects("Enum", "Class");  // the UEnum metaclass
+    if (!enumMeta) {
+        PDBG("ProbeUEnumNames: 找不到 \"Enum\" 元类, 中止");
+        PDBG("<<<<<<<<<< [ProbeUEnumNames] END <<<<<<<<<<");
+        return;
+    }
+
+    // TPair<FName,int64> stride: align8(FName.Size) + sizeof(int64).
+    FNameLayout fl = ProfileGetFNameLayout();
+    const int fnameSize = (fl.size >= 4 && fl.size <= 16) ? fl.size : 8;
+    const int alignedFName = (fnameSize + 7) & ~7;
+    const int pairSize  = alignedFName + 8;
+
+    // Collect UEnum samples by class-pointer identity (cheap, no name resolve).
+    std::vector<uintptr_t> enums;
+    const int total = BridgeGetObjectNum();
+    for (int i = 0; i < total && (int)enums.size() < 8; ++i) {
+        uintptr_t o = reinterpret_cast<uintptr_t>(BridgeGetObjectByIndex(i));
+        if (!o) continue;
+        uintptr_t oClass = 0;
+        if (!KMgrRead(o + classOff, &oClass, 8)) continue;
+        if (oClass == enumMeta) enums.push_back(o);
+    }
+    if (enums.empty()) {
+        PDBG("ProbeUEnumNames: 没找到 UEnum 样本, 中止");
+        PDBG("<<<<<<<<<< [ProbeUEnumNames] END <<<<<<<<<<");
+        return;
+    }
+    PDBG("ProbeUEnumNames: 收集 {} 个 UEnum 样本, pairSize=0x{:X}", enums.size(), pairSize);
+
+    auto validateArray = [&](uintptr_t e, int32_t off) -> bool {
+        uintptr_t data = 0; int32_t num = 0, max = 0;
+        if (!KMgrRead(e + off, &data, 8) || !IsValidPtr(data)) return false;
+        if (!KMgrRead(e + off + 8, &num, 4)) return false;
+        if (!KMgrRead(e + off + 12, &max, 4)) return false;
+        if (num < 1 || num > 4096) return false;
+        if (max < num || max > 65536) return false;
+        // First up-to-2 elements must be {resolvable FName, small enum value}.
+        const int check = num >= 2 ? 2 : 1;
+        for (int k = 0; k < check; ++k) {
+            uintptr_t pair = data + (uintptr_t)k * pairSize;
+            std::string nm;
+            if (!TryReadFName(pair, nm)) return false;
+            uint64_t val = 0;
+            if (!KMgrRead(pair + alignedFName, &val, 8)) return false;
+            if (val >= 0x10000) return false;  // string-byte "values" are huge → excludes CppType FString
+        }
+        return true;
+    };
+
+    // UEnum::Names lives after UObject(0x28)+Next+CppType; scan a fixed window
+    // covering standard (0x40) and padded (NiZhan 0x58) layouts.
+    int bestOff = -1, bestScore = 0;
+    for (int32_t off = 0x28; off <= 0xC0; off += 8) {
+        int score = 0;
+        for (uintptr_t e : enums) if (validateArray(e, off)) score++;
+        if (score > bestScore) { bestScore = score; bestOff = off; }
+    }
+
+    const int need = (int)enums.size() >= 3 ? 3 : (int)enums.size();
+    if (bestOff >= 0 && bestScore >= need) {
+        auto& r = GetResult("UEnum::Names");
+        r.offset = bestOff; r.size = 16; r.typeName = "TArray<TPair<FName,int64>>";
+        r.evidence = "probed via UEnum cast-flag samples";
+        r.autoDetected = true; r.confirmed = true;
+        PDBG("ProbeUEnumNames: UEnum::Names = 0x{:X} ({}/{} enums)", bestOff, bestScore, enums.size());
+    } else {
+        PDBG("ProbeUEnumNames: 无一致候选 (best=0x{:X} score={}/{}), 回退派生公式",
+             bestOff, bestScore, enums.size());
+    }
+    PDBG("<<<<<<<<<< [ProbeUEnumNames] END <<<<<<<<<<");
 }
 
 // ============================================================
@@ -4851,6 +4938,9 @@ void UEProber::StartDump() {
 
     // UField
     if (HasConfirmed("UField::Next"))            offsets.fieldNext = GetConfirmedOffset("UField::Next");
+
+    // UEnum
+    if (HasConfirmed("UEnum::Names"))            offsets.uenumNames = GetConfirmedOffset("UEnum::Names");
 
     // UStruct
     if (HasConfirmed("UStruct::SuperStruct"))          offsets.structSuper     = GetConfirmedOffset("UStruct::SuperStruct");

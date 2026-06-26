@@ -1,9 +1,7 @@
 #pragma once
+#include "IGameProfileAndroid.hpp"
 
-#include "UE/UEGameProfile.hpp"
-using namespace UEMemory;
-
-class PUBGProfile : public IGameProfile
+class PUBGProfile : public IGameProfileAndroid
 {
 public:
     PUBGProfile() = default;
@@ -45,8 +43,16 @@ public:
         return false;
     }
 
+    bool IsFNamePassedByValue() const override
+    {
+        return true;
+    }
+
     uintptr_t GetGUObjectArrayPtr() const override
     {
+        if (uintptr_t a = FindGUObjectArrayViaFinishDestroy())
+            return a;
+
         std::string ida_pattern = "12 40 B9 ? 3E 40 B9 ? ? ? 6B ? ? ? 54 ? ? ? ? ? ? ? 91";
         const int step = 0xf;
 
@@ -75,128 +81,12 @@ public:
         return &offsets;
     }
 
-    static uintptr_t DecodeBL(uintptr_t bl_address)
-    {
-        if (!bl_address) return 0;
-        uint32_t insn = *reinterpret_cast<uint32_t*>(bl_address);
-        if ((insn & 0xFC000000) != 0x94000000) return 0;
-        int32_t imm26 = insn & 0x03FFFFFF;
-        if (imm26 & 0x02000000) imm26 |= (int32_t)0xFC000000;
-        return bl_address + (int64_t)imm26 * 4;
-    }
-
-    // FName::ToString anchor via UTimelineTemplate::UpdateCachedNames() — see
-    // DeltaForce.hpp for the rationale. First BL of that function (located by the
-    // Printf literal "%s__Direction_%s") is GetName()==FName::ToString.
-    uintptr_t FindFNameToString() const
-    {
-        static uintptr_t cached = 0;
-        if (cached) return cached;
-
-        static const char *kDirPat =
-            "25 00 73 00 5F 00 5F 00 44 00 69 00 72 00 65 00 63 00 74 00 69 00 6F 00 6E 00 5F 00 25 00 73 00";
-        uintptr_t strAddr = findIdaPattern(PATTERN_MAP_TYPE::ANY_R, kDirPat, 0);
-        if (!strAddr) { LOGE("[ToStringDecrypt] \"%%s__Direction_%%s\" not found"); return 0; }
-
-        uintptr_t xref = FindAdrpXrefToAddr(strAddr);
-        if (!xref) { LOGE("[ToStringDecrypt] no ADRP xref to str %p", (void *)strAddr); return 0; }
-
-        uintptr_t funcStart = 0;
-        for (int i = 0; i < 0x200; i++)
-        {
-            uintptr_t p = xref - (uintptr_t)i * 4;
-            uint32_t insn = vm_rpm_ptr<uint32_t>((void *)p);
-            if ((insn & 0xFF8003FF) == 0xD10003FF) { funcStart = p; break; }  // SUB SP, SP, #imm
-        }
-        if (!funcStart) return 0;
-
-        for (uintptr_t p = funcStart; p < funcStart + 0x100; p += 4)
-        {
-            uint32_t insn = vm_rpm_ptr<uint32_t>((void *)p);
-            if ((insn & 0xFC000000) == 0x94000000)  // BL
-            {
-                uintptr_t t = DecodeBL(p);
-                if (t && kPtrValidator.isPtrExecutable(t, sizeof(uint32_t)))
-                {
-                    cached = t;
-                    uintptr_t base = GetUnrealELF().base();
-                    LOGI("[ToStringDecrypt] FName::ToString @ %p (+0x%lX) str=+0x%lX func=+0x%lX",
-                         (void *)t, (unsigned long)(t - base),
-                         (unsigned long)(strAddr - base), (unsigned long)(funcStart - base));
-                    return t;
-                }
-            }
-        }
-        LOGE("[ToStringDecrypt] no BL in prologue window @ func=%p", (void *)funcStart);
-        return 0;
-    }
-
-    uintptr_t FindAdrpXrefToAddr(uintptr_t target) const
-    {
-        if (!target) return 0;
-        const uintptr_t targetPage = target & ~uintptr_t(0xFFF);
-
-        ElfScanner ue = GetUnrealELF();
-        const size_t kChunkInsns = 0x40000;
-        std::vector<uint32_t> buf(kChunkInsns);
-
-        for (auto &seg : ue.segments())
-        {
-            if (!seg.readable || !seg.is_private) continue;
-            if (!isEmulator() && !seg.executable) continue;
-
-            for (uintptr_t base = seg.startAddress; base < seg.endAddress; base += kChunkInsns * 4)
-            {
-                size_t remain = (seg.endAddress - base) / 4;
-                size_t n = remain < kChunkInsns ? remain : kChunkInsns;
-                if (!vm_rpm_ptr((void *)base, buf.data(), n * sizeof(uint32_t)))
-                    continue;
-
-                for (size_t i = 0; i < n; i++)
-                {
-                    uint32_t insn = buf[i];
-                    if ((insn & 0x9F000000) != 0x90000000) continue;  // ADRP
-
-                    int64_t imm = (int64_t)((((insn >> 5) & 0x7FFFF) << 2) | ((insn >> 29) & 0x3));
-                    imm = (imm << 43) >> 43;
-                    imm <<= 12;
-
-                    uintptr_t pc = base + i * 4;
-                    if (((pc & ~uintptr_t(0xFFF)) + (uintptr_t)imm) != targetPage) continue;
-                    if (Arm64::DecodeADRL(pc) == target) return pc;
-                }
-            }
-        }
-        return 0;
-    }
-
     std::string GetNameByID(int32_t id) const override
     {
-        if (id < 0) return "";
-
-        // Primary: FName::ToString. PUBG family passes the FName BY VALUE in X0
-        // (the getter copies it to a stack slot internally), unlike DFM/Valorant
-        // which stage &FName and pass a pointer. FString returned via X8 sret.
-        if (uintptr_t toString = FindFNameToString())
+        if (FindFNameToString())
         {
-            struct FStr { char16_t *Data; int32_t Num; int32_t Max; ~FStr() {} };
-            using ToStringFn = FStr (*)(uint64_t);  // X0 = FName value {Comparison=id, Number=0}
-            FStr out = ((ToStringFn)toString)((uint64_t)(uint32_t)id);
-            if (out.Data && out.Num > 1)
-            {
-                std::string result;
-                result.reserve(out.Num);
-                for (int32_t i = 0; i + 1 < out.Num && i < 1024; i++)
-                {
-                    char16_t wc = out.Data[i];
-                    if (!wc) break;
-                    result.push_back(static_cast<char>(wc));
-                }
-                return result;
-            }
+            return GetNameByID_ViaToString(id);
         }
-
-        // Fallback: standard FNameEntry read (works for non-injected later too)
         return IGameProfile::GetNameByID(id);
     }
 };

@@ -324,8 +324,7 @@ void StartDumpWithProbedOffsets(
 
     if (offsets.fieldNext)     probedUEOffsets.UField.Next = offsets.fieldNext;
 
-    // usually at sizeof(UField) + sizeof(FString)
-    if (offsets.fieldNext)   probedUEOffsets.UEnum.Names = probedUEOffsets.UField.Next + (sizeof(void *) * 2) + (sizeof(int32_t) * 2);
+    if (offsets.uenumNames)  probedUEOffsets.UEnum.Names = offsets.uenumNames;
 
     if (offsets.structSuper)     probedUEOffsets.UStruct.SuperStruct = offsets.structSuper;
     if (offsets.structChildren)  probedUEOffsets.UStruct.Children = offsets.structChildren;

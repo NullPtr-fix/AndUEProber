@@ -55,7 +55,8 @@ cmake --build build
 
 - [x] Auto-detect GUObjectArray / FName::ToString / ProcessEventIdx
 - [x] Fix FName::ToString on UE 4.18
-- [ ] 
+- [ ] Fix com.tencent.tmgp.pubgmhd ProcessEventIndex
+- [ ] UE6
 
 ## Credits
 

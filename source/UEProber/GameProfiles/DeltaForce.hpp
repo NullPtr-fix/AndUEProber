@@ -104,6 +104,9 @@ public:
             offsets.FUObjectArray.ObjObjects = offsetof(FUObjectArray, ObjObjects);
             offsets.TUObjectArray.Objects = offsetof(FChunkedFixedUObjectArray, Objects);
             offsets.TUObjectArray.NumElements = offsetof(FChunkedFixedUObjectArray, NumElements);
+            offsets.TUObjectArray.MaxElements = offsetof(FChunkedFixedUObjectArray, MaxElements);
+            offsets.TUObjectArray.MaxChunks = offsetof(FChunkedFixedUObjectArray, MaxChunks);
+            offsets.TUObjectArray.NumChunks = offsetof(FChunkedFixedUObjectArray, NumChunks);
         }
         return &offsets;
     }
